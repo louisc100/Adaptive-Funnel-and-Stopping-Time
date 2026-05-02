@@ -188,7 +188,7 @@ Z_t^{\mathrm{down}}
 {\sqrt{V_{\tau_s}(t)}},
 \qquad t>\tau_s.
 \]
-The next buying time is defined by the symmetric lower-funnel recovery rule
+The original symmetric re-entry rule buys after a lower-funnel recovery:
 \[
 \tau_b^{\mathrm{next}}
 =
@@ -197,11 +197,23 @@ t>\tau_s:
 Z_t^{\mathrm{down}}<-k,\quad M_t\geq 0
 \right\}.
 \]
+This is useful in mean-reverting or choppy markets, but it can leave the strategy in cash during persistent upward trends. To reduce this opportunity-cost problem, the implementation also allows a trend-continuation re-entry. Let \(z_{\mathrm{trend}}\geq 0\) be a smaller entry threshold. The practical re-entry rule is
+\[
+\tau_b^{\mathrm{next}}
+=
+\inf\left\{
+t>\tau_s:
+\left(Z_t^{\mathrm{down}}<-k,\ M_t\geq 0\right)
+\ \text{or}\
+\left(Z_t^{\mathrm{down}}>z_{\mathrm{trend}},\ M_t>0\right)
+\right\}.
+\]
+The first condition is the bargain re-entry rule: buy after an unusually low price has started to recover. The second condition is the trend-continuation rule: buy when the price is above the adaptive center and local momentum is positive. In the simulation, \(z_{\mathrm{trend}}\) is intentionally smaller than \(k\), because it is meant to detect participation in an ongoing trend rather than an extreme statistical event.
 
 Thus the full algorithm alternates between two regimes:
 \begin{enumerate}
     \item while holding the asset, sell only when the upper-funnel, weakened-momentum, and profit-threshold conditions are all satisfied;
-    \item while in cash, buy after a lower-funnel deviation once local momentum has recovered.
+    \item while in cash, buy either after a lower-funnel recovery or after a trend-continuation signal.
 \end{enumerate}
 
 The no-realized-loss theorem below applies to completed sell exits. The re-entry rule determines when capital is redeployed, but it does not by itself create a realized gain or loss.
@@ -360,7 +372,7 @@ The corresponding price-level curves are
 \]
 These are the curves displayed in the price panel.
 
-While the strategy is holding the asset, the upper boundary \(\exp(U_{\tau_b}(t))\) is the relevant exit boundary. A sell can occur only after the price crosses this upper boundary, momentum has weakened, and the profit-threshold condition is satisfied. While the strategy is in cash, the lower boundary \(\exp(L_{\tau_s}(t))\) is the relevant re-entry boundary. A buy can occur only after the price crosses below this lower boundary and local momentum recovers.
+While the strategy is holding the asset, the upper boundary \(\exp(U_{\tau_b}(t))\) is the relevant exit boundary. A sell can occur only after the price crosses this upper boundary, momentum has weakened, and the profit-threshold condition is satisfied. While the strategy is in cash, the lower boundary \(\exp(L_{\tau_s}(t))\) remains the bargain re-entry boundary. A buy can occur either after the price crosses below this lower boundary and local momentum recovers, or after the price moves above the adaptive center with positive momentum according to the trend-continuation rule.
 
 Whenever the strategy sells or buys, the reference time is reset. Thus the plotted funnel is not one fixed band drawn from \(t=0\); it is a sequence of local predictive funnels, each anchored at the current trade reference point. This visualization is useful because it separates three ideas that are otherwise easy to confuse:
 \begin{enumerate}

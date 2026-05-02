@@ -249,6 +249,7 @@ def run_strategy_on_log_prices(
     garch_beta=0.90,
     max_funnel_lookback=60,
     trailing_stop=0.04,
+    trend_entry_z=0.35,
     mode="Simulation",
     extra=None,
 ):
@@ -366,12 +367,21 @@ def run_strategy_on_log_prices(
                     buy_t  = t
                     buy_price = prices[t]
         else:
-            # Symmetric re-entry rule: buy after a lower-funnel deviation and momentum recovery.
+            # Re-entry rule:
+            #   1. bargain buy after a lower-funnel deviation and momentum recovery;
+            #   2. trend buy when price is above the adaptive center with positive momentum.
             if buy_t is not None and t >= delta + 1 and not np.isnan(M):
                 if el >= 1:
                     denom = np.sqrt(var_since_ref)
                     Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
-                    if not np.isnan(Zd) and Zd < -k and M >= 0:
+                    bargain_entry = not np.isnan(Zd) and Zd < -k and M >= 0
+                    trend_entry = (
+                        trend_entry_z is not None
+                        and not np.isnan(Zd)
+                        and Zd > trend_entry_z
+                        and M > 0
+                    )
+                    if bargain_entry or trend_entry:
                         in_pos = True
                         buy_t  = t
                         buy_lp = lp[t]
@@ -411,6 +421,7 @@ def run_strategy_on_log_prices(
         drift_init=drift_init, garch_alpha=garch_alpha, garch_beta=garch_beta,
         max_funnel_lookback=max_funnel_lookback,
         trailing_stop=trailing_stop,
+        trend_entry_z=trend_entry_z,
         **(extra or {}),
     )
 
@@ -432,6 +443,7 @@ def run_simulation(
     garch_beta=0.90,
     max_funnel_lookback=60,
     trailing_stop=0.04,
+    trend_entry_z=0.35,
 ):
     """
     Simulate the adaptive funnel rule.
@@ -462,6 +474,7 @@ def run_simulation(
         garch_beta=garch_beta,
         max_funnel_lookback=max_funnel_lookback,
         trailing_stop=trailing_stop,
+        trend_entry_z=trend_entry_z,
         mode="Simulation",
         extra={"clip_noise": clip_noise},
     )
@@ -864,6 +877,7 @@ def run_online_adaptive_strategy(
     delta_init=3,
     max_funnel_lookback=60,
     trailing_stop=0.04,
+    trend_entry_z=0.35,
     k_grid=None,
     delta_grid=None,
     source="Real daily prices",
@@ -1037,7 +1051,14 @@ def run_online_adaptive_strategy(
                 if el >= 1:
                     denom = np.sqrt(var_since_ref)
                     Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
-                    if not np.isnan(Zd) and Zd < -current_k and M >= 0:
+                    bargain_entry = not np.isnan(Zd) and Zd < -current_k and M >= 0
+                    trend_entry = (
+                        trend_entry_z is not None
+                        and not np.isnan(Zd)
+                        and Zd > trend_entry_z
+                        and M > 0
+                    )
+                    if bargain_entry or trend_entry:
                         in_pos = True
                         buy_t = t
                         buy_lp = lp[t]
@@ -1079,6 +1100,7 @@ def run_online_adaptive_strategy(
             "update_window": update_window,
             "max_funnel_lookback": max_funnel_lookback,
             "trailing_stop": trailing_stop,
+            "trend_entry_z": trend_entry_z,
         },
     )
 
