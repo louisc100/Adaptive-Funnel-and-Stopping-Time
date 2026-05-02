@@ -73,13 +73,13 @@ L(t)=C(t)-k\sqrt{V(t)}.
 Equivalently, define the normalized deviation statistic
 \[
 Z_t=
-\frac{X_t-X_{\tau_b}-\mu(t-\tau_b)}{\sigma\sqrt{t-\tau_b}},
+\frac{X_t-C(t)}{\sqrt{V(t)}},
 \qquad t>\tau_b.
 \]
 Then \(X_t>U(t)\) is equivalent to \(Z_t>k\).
 
 \begin{remark}[Fixed-time versus sequential interpretation]
-For a fixed time \(t\), under the Gaussian model, \(Z_t\sim\mathcal N(0,1)\). However, the trading rule monitors \(Z_t\) repeatedly over time. Therefore the relevant object is not only the fixed-time tail probability \(P(Z_t>k)\), but the boundary-crossing probability
+For a fixed time \(t\), under the fixed-parameter Gaussian baseline with correctly specified \(\mu\) and \(\sigma\), \(Z_t\sim\mathcal N(0,1)\). However, the trading rule monitors \(Z_t\) repeatedly over time. Therefore the relevant object is not only the fixed-time tail probability \(P(Z_t>k)\), but the boundary-crossing probability
 \[
 P\left(\sup_{\tau_b<t\leq T}Z_t>k\right).
 \]
@@ -125,7 +125,7 @@ When transaction costs are ignored, \(h=0\).
 
 \section{Stopping Rule}
 
-\begin{definition}[Adaptive funnel stopping rule, fixed-parameter version]
+\begin{definition}[Adaptive funnel stopping rule]
 Given a buying time \(\tau_b\), define the selling time by
 \[
 \tau_s=
@@ -150,12 +150,12 @@ The rule says: sell only after the price crosses the upper funnel boundary, loca
 
 The stopping rule above describes when an existing long position is exited. To turn the rule into a repeated trading strategy, we also specify how the strategy re-enters after a completed sale.
 
-Suppose the strategy sells at time \(\tau_s\) and then holds cash. During the cash period, take \(\tau_s\) as the new reference time and define
+Suppose the strategy sells at time \(\tau_s\) and then holds cash. During the cash period, take \(\tau_s\) as the new reference time, define the corresponding predictive center \(C_{\tau_s}(t)\) and variance \(V_{\tau_s}(t)\), and set
 \[
 Z_t^{\mathrm{down}}
 =
-\frac{X_t-X_{\tau_s}-\mu(t-\tau_s)}
-{\sigma\sqrt{t-\tau_s}},
+\frac{X_t-C_{\tau_s}(t)}
+{\sqrt{V_{\tau_s}(t)}},
 \qquad t>\tau_s.
 \]
 The next buying time is defined by the symmetric lower-funnel recovery rule
@@ -339,6 +339,52 @@ Whenever the strategy sells or buys, the reference time is reset. Thus the plott
     \item executable trading decisions, which also require momentum and, for sells, the profit threshold.
 \end{enumerate}
 
+\section{Phase 4 Adaptive Drift Estimation}
+
+Phase 4 removes the unrealistic assumption that the strategy knows the true drift \(\mu\). The simulated market may still be generated from a baseline drift in order to create controlled experiments, but the trading rule uses an estimated drift when drawing its funnel.
+
+Let
+\[
+r_t=X_t-X_{t-1}
+\]
+denote the one-step log-return. We model the drift used by the strategy as a slowly changing latent state:
+\[
+\mu_t=\mu_{t-1}+\eta_t,
+\qquad
+\eta_t\sim\mathcal N(0,q),
+\]
+and observe returns through
+\[
+r_t=\mu_t+\xi_t,
+\qquad
+\xi_t\sim\mathcal N(0,\sigma^2).
+\]
+Here \(q\geq 0\) is the drift-adaptation variance. A larger \(q\) makes the drift estimate react faster to recent returns, while \(q=0\) gives a constant-drift estimator whose gain shrinks over time.
+
+To avoid lookahead bias, the funnel for step \(s\) uses the one-step-ahead prediction \(\hat\mu_{s|s-1}\), not the posterior estimate after seeing \(r_s\). The Kalman recursion is
+\[
+\hat\mu_{s|s-1}=\hat\mu_{s-1|s-1},
+\qquad
+P_{s|s-1}=P_{s-1|s-1}+q,
+\]
+\[
+K_s=\frac{P_{s|s-1}}{P_{s|s-1}+\sigma^2},
+\]
+\[
+\hat\mu_{s|s}=
+\hat\mu_{s|s-1}+K_s\left(r_s-\hat\mu_{s|s-1}\right),
+\qquad
+P_{s|s}=(1-K_s)P_{s|s-1}.
+\]
+
+With adaptive drift and fixed volatility, the Phase 4 funnel after reference time \(\tau\) becomes
+\[
+C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
+\qquad
+V_\tau(t)=\sum_{s=\tau+1}^{t}\sigma^2.
+\]
+The simulation initializes the filter from a neutral prior rather than the true simulated drift. The same upper-funnel sell rule, lower-funnel re-entry rule, momentum filter, and transaction-cost profit threshold are then applied using this adaptive center. Phase 5 will keep the same structure but replace the fixed \(\sigma^2\) in \(V_\tau(t)\) with an adaptive volatility estimate.
+
 \section{Discussion and Limitations}
 
 The strategy enforces a no-realized-loss condition on completed voluntary exits. However, this does not imply that the strategy is risk-free. The main limitations are:
@@ -351,7 +397,7 @@ The strategy enforces a no-realized-loss condition on completed voluntary exits.
     \item \textbf{Parameter estimation error:} the drift \(\mu\) is difficult to estimate accurately.
 \end{itemize}
 
-Future phases should replace fixed \(\mu\) and \(\sigma\) with estimated or adaptive quantities, such as Kalman-filtered drift and GARCH volatility, yielding an adaptive funnel.
+Future phases should extend the same adaptive structure to volatility, for example by replacing the fixed \(\sigma^2\) term with a GARCH-style estimate.
 
 \section{Conclusion}
 

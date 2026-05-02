@@ -1,8 +1,8 @@
 """
-Interactive Trading Algorithm — Phase 3 Funnel Visualization Version
+Interactive Trading Algorithm — Phase 4 Adaptive Drift Version
 -----------------------------------------------------
 A PyQt5 app with:
-  - Sliders for sigma, mu, k, delta, transaction cost, speed
+  - Sliders for sigma, true mu, adaptive drift strength, k, delta, transaction cost, speed
   - Generate / Play / Pause / Reset buttons
   - Time scrubber to seek anywhere in the simulation
   - Three live-updating panels:
@@ -15,7 +15,7 @@ A PyQt5 app with:
            buy-and-hold benchmark (teal dotted)
   - Live stats sidebar (t, price, wealth, return, drawdown, benchmark gap)
 
-Phase 3 includes:
+Phase 4 includes:
   1. Explicit profit threshold h = log((1+c_buy)/(1-c_sell)).
   2. Sell condition requires log_return > h.
   3. Transaction-cost-adjusted realized wealth update.
@@ -24,6 +24,7 @@ Phase 3 includes:
   6. Gaussian shocks are no longer clipped by default.
   7. Completed trade records, drawdown, exposure, and benchmark-gap metrics.
   8. Visible center, upper, and lower funnel paths on the price chart.
+  9. Kalman-filtered drift estimates used by the predictive funnel.
 
 Dependencies:
     pip install numpy matplotlib PyQt5
@@ -117,6 +118,37 @@ def summarize_simulation(data, t=None):
     }
 
 
+def kalman_drift_estimates(log_returns, init_mu, obs_var, process_var):
+    """
+    Estimate one-step drift with a local-level Kalman filter.
+
+    mu_prior[s] is the drift estimate used to predict return s before seeing it.
+    mu_filtered[t] is the posterior estimate after observing returns through t.
+    """
+    n_steps = len(log_returns)
+    obs_var = max(float(obs_var), 1e-12)
+    process_var = max(float(process_var), 0.0)
+
+    mu_prior = np.zeros(n_steps + 1)
+    mu_filtered = np.zeros(n_steps + 1)
+    post_mean = float(init_mu)
+    post_var = obs_var
+    mu_prior[0] = post_mean
+    mu_filtered[0] = post_mean
+
+    for step, r in enumerate(log_returns, start=1):
+        pred_mean = post_mean
+        pred_var = post_var + process_var
+        mu_prior[step] = pred_mean
+
+        kalman_gain = pred_var / (pred_var + obs_var)
+        post_mean = pred_mean + kalman_gain * (r - pred_mean)
+        post_var = (1.0 - kalman_gain) * pred_var
+        mu_filtered[step] = post_mean
+
+    return mu_prior, mu_filtered
+
+
 # ── Simulation ────────────────────────────────────────────────────────────────
 def run_simulation(
     mu,
@@ -128,9 +160,11 @@ def run_simulation(
     c_buy=0.0,
     c_sell=0.0,
     clip_noise=False,
+    drift_process_var=1e-7,
+    drift_init=0.0,
 ):
     """
-    Simulate the Phase 2 rule.
+    Simulate the adaptive funnel rule.
 
     The exact paper model uses Gaussian shocks. Set clip_noise=True only for
     smoother visualization, not for theory validation.
@@ -145,11 +179,18 @@ def run_simulation(
     for t in range(n_steps):
         lp[t + 1] = lp[t] + mu + sigma * noise[t]
     prices = np.exp(lp)
+    log_returns = np.diff(lp)
 
     N = n_steps + 1
+    mu_step, mu_hat = kalman_drift_estimates(
+        log_returns,
+        init_mu=drift_init,
+        obs_var=sigma * sigma,
+        process_var=drift_process_var,
+    )
     cumulative_drift = np.zeros(N)
     cumulative_var = np.zeros(N)
-    cumulative_drift[1:] = np.cumsum(np.full(n_steps, mu))
+    cumulative_drift[1:] = np.cumsum(mu_step[1:])
     cumulative_var[1:] = np.cumsum(np.full(n_steps, sigma * sigma))
 
     realized_w  = np.full(N, 1000.0)
@@ -260,8 +301,10 @@ def run_simulation(
         Zsig=Zsig, holding=holding,
         buy_times=set(buy_times), sell_times=set(sell_times),
         trade_log=trade_log,
+        mu_step=mu_step, mu_hat=mu_hat,
         N=n_steps, k=k, h=h, c_buy=c_buy, c_sell=c_sell,
-        clip_noise=clip_noise,
+        clip_noise=clip_noise, drift_process_var=drift_process_var,
+        drift_init=drift_init,
     )
 
 
@@ -387,7 +430,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trading Algorithm — Interactive Phase 3")
+        self.setWindowTitle("Trading Algorithm — Interactive Phase 4")
         self.resize(1280, 760)
         self._apply_dark_palette()
 
@@ -430,7 +473,8 @@ class MainWindow(QMainWindow):
         self.sliders = {}
         defs = [
             ("sigma  (volatility)", "sigma", 5,  40,  15, 1000),
-            ("mu  (drift/step)",    "mu",  -20,  30,   5, 10000),
+            ("true mu  (market drift)", "mu",  -20,  30,   5, 10000),
+            ("drift adapt  (Q x1e-8)", "drift_q", 0, 100, 10, 1),
             ("k  (threshold)",      "k",     5,  25,  12, 10),
             ("delta  (window)",     "delta", 1,  20,   8, 1),
             ("cost/side",           "cost",  0,  50,   0, 10000),
@@ -551,6 +595,7 @@ class MainWindow(QMainWindow):
             ("price",    "Price"),
             ("pos",      "Position"),
             ("z",        "Z"),
+            ("mu_hat",   "mu hat"),
             ("wealth",   "Realized W"),
             ("mtm",      "MtM W"),
             ("bh",       "Buy-hold W"),
@@ -589,6 +634,7 @@ class MainWindow(QMainWindow):
     def _fmt(self, key, v):
         if key == "sigma": return f"{v:.3f}"
         if key == "mu":    return f"{v:.4f}"
+        if key == "drift_q": return f"{v:.0f}"
         if key == "k":     return f"{v:.1f}"
         if key == "delta": return f"{int(v)}"
         if key == "cost":  return f"{v * 10000:.0f} bp"
@@ -622,6 +668,7 @@ class MainWindow(QMainWindow):
             k=p["k"], delta=int(p["delta"]),
             c_buy=p["cost"], c_sell=p["cost"],
             clip_noise=False,
+            drift_process_var=p["drift_q"] * 1e-8,
         )
         self.sim_data = data
         self.scrubber.setMaximum(data["N"])
@@ -686,6 +733,7 @@ class MainWindow(QMainWindow):
             self.stat_labels["exposure"].setText(
                 f"{metrics['exposure'] * 100:.0f}%")
             self.stat_labels["z"].setText(zs)
+            self.stat_labels["mu_hat"].setText(f"{d['mu_hat'][t]:+.5f}")
             self.stat_labels["h"].setText(f"{d['h']:.5f}")
             self.stat_labels["pos"].setText(pos)
 
