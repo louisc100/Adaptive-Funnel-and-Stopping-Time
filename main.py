@@ -1,5 +1,5 @@
 """
-Interactive Trading Algorithm — Phase 5 Adaptive Volatility Version
+Interactive Trading Algorithm — Phase 6 Walk-Forward Backtest Version
 -----------------------------------------------------
 A PyQt5 app with:
   - Sliders for sigma, true mu, adaptive drift strength, k, delta, transaction cost, speed
@@ -15,7 +15,7 @@ A PyQt5 app with:
            buy-and-hold benchmark (teal dotted)
   - Live stats sidebar (t, price, wealth, return, drawdown, benchmark gap)
 
-Phase 5 includes:
+Phase 6 includes:
   1. Explicit profit threshold h = log((1+c_buy)/(1-c_sell)).
   2. Sell condition requires log_return > h.
   3. Transaction-cost-adjusted realized wealth update.
@@ -26,16 +26,24 @@ Phase 5 includes:
   8. Visible center, upper, and lower funnel paths on the price chart.
   9. Kalman-filtered drift estimates used by the predictive funnel.
  10. GARCH-style conditional volatility forecasts used by the funnel width.
+ 11. Walk-forward parameter selection with out-of-sample test folds.
 
 Dependencies:
     pip install numpy matplotlib PyQt5
 """
 
+import csv
+import json
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSlider, QLabel, QPushButton, QGridLayout, QGroupBox, QSizePolicy,
+    QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -43,6 +51,7 @@ from PyQt5.QtGui import QFont, QColor, QPalette
 import matplotlib
 matplotlib.use("Qt5Agg")
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 import matplotlib.gridspec as gridspec
 
@@ -59,6 +68,7 @@ PURPLE   = "#7F77DD"
 TEAL     = "#9FE1CB"
 F_UPPER  = "#F2B84B"
 F_LOWER  = "#6CC6FF"
+DEFAULT_REAL_SYMBOL = "SPY"
 
 
 # ── Phase 1 utilities ─────────────────────────────────────────────────────────
@@ -117,6 +127,31 @@ def summarize_simulation(data, t=None):
         "exposure": float(np.mean(holding)) if holding.size else 0.0,
         "completed_trades": len([tr for tr in data["trade_log"] if tr["sell_t"] <= t]),
     }
+
+
+def annualized_sharpe(values, periods_per_year=252):
+    """Annualized Sharpe ratio from a wealth curve, using zero risk-free rate."""
+    values = np.asarray(values, dtype=float)
+    if values.size < 3:
+        return np.nan
+    returns = np.diff(values) / values[:-1]
+    vol = np.std(returns, ddof=1)
+    if vol <= 0:
+        return np.nan
+    return float(np.sqrt(periods_per_year) * np.mean(returns) / vol)
+
+
+def calmar_ratio(values, periods_per_year=252):
+    """Annualized return divided by absolute maximum drawdown."""
+    values = np.asarray(values, dtype=float)
+    if values.size < 2 or values[0] <= 0:
+        return np.nan
+    years = max((values.size - 1) / periods_per_year, 1e-12)
+    annual_return = (values[-1] / values[0]) ** (1.0 / years) - 1.0
+    drawdown = abs(max_drawdown(values))
+    if drawdown <= 0:
+        return np.nan
+    return float(annual_return / drawdown)
 
 
 def kalman_drift_estimates(log_returns, init_mu, obs_var, process_var):
@@ -190,51 +225,42 @@ def garch_volatility_estimates(
     return var_prior, sigma_hat
 
 
-# ── Simulation ────────────────────────────────────────────────────────────────
-def run_simulation(
-    mu,
-    sigma,
+def run_strategy_on_log_prices(
+    lp,
     k,
     delta,
-    n_steps=500,
-    seed=None,
+    sigma_seed,
     c_buy=0.0,
     c_sell=0.0,
-    clip_noise=False,
     drift_process_var=1e-7,
     drift_init=0.0,
     garch_alpha=0.06,
     garch_beta=0.90,
+    max_funnel_lookback=60,
+    trailing_stop=0.04,
+    mode="Simulation",
+    extra=None,
 ):
-    """
-    Simulate the adaptive funnel rule.
-
-    The exact paper model uses Gaussian shocks. Set clip_noise=True only for
-    smoother visualization, not for theory validation.
-    """
-    rng = np.random.default_rng(seed)
-    noise = rng.standard_normal(n_steps)
-    if clip_noise:
-        noise = np.clip(noise, -2.0, 2.0)
-
-    lp = np.empty(n_steps + 1)
-    lp[0] = np.log(100.0)
-    for t in range(n_steps):
-        lp[t + 1] = lp[t] + mu + sigma * noise[t]
+    """Run the adaptive funnel rule on an existing log-price path."""
+    lp = np.asarray(lp, dtype=float)
+    if lp.size < 2:
+        raise ValueError("A price path must contain at least two observations.")
     prices = np.exp(lp)
     log_returns = np.diff(lp)
 
-    N = n_steps + 1
+    n_steps = lp.size - 1
+    N = lp.size
+    sigma_seed = max(float(sigma_seed), 1e-6)
     mu_step, mu_hat = kalman_drift_estimates(
         log_returns,
         init_mu=drift_init,
-        obs_var=sigma * sigma,
+        obs_var=sigma_seed * sigma_seed,
         process_var=drift_process_var,
     )
     var_step, sigma_hat = garch_volatility_estimates(
         log_returns,
         mu_prior=mu_step,
-        init_var=sigma * sigma,
+        init_var=sigma_seed * sigma_seed,
         alpha=garch_alpha,
         beta=garch_beta,
     )
@@ -262,6 +288,7 @@ def run_simulation(
     buy_t  = 1
     buy_lp = lp[1]
     buy_price = prices[1]
+    peak_lp = buy_lp
     buy_times.append(1)
 
     # Buy-and-hold benchmark starts from the same initial buy time.
@@ -271,32 +298,45 @@ def run_simulation(
     for t in range(1, N):
         M = lp[t] - lp[t - delta] if t >= delta else np.nan
         el = t - buy_t if buy_t is not None else 0
+        ref_t = buy_t
+        ref_lp = buy_lp
+        if max_funnel_lookback is not None and el > max_funnel_lookback:
+            ref_t = t - max_funnel_lookback
+            ref_lp = lp[ref_t]
         if el >= 0:
-            drift_since_ref = cumulative_drift[t] - cumulative_drift[buy_t]
-            var_since_ref = cumulative_var[t] - cumulative_var[buy_t]
-            center = buy_lp + drift_since_ref
+            drift_since_ref = cumulative_drift[t] - cumulative_drift[ref_t]
+            var_since_ref = cumulative_var[t] - cumulative_var[ref_t]
+            center = ref_lp + drift_since_ref
             width = k * np.sqrt(var_since_ref)
             funnel_mid[t] = np.exp(center)
             funnel_up[t] = np.exp(center + width)
             funnel_low[t] = np.exp(center - width)
 
         if in_pos:
+            peak_lp = max(peak_lp, lp[t])
             if el >= 1:
                 denom = np.sqrt(var_since_ref)
-                Z = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
+                Z = (lp[t] - ref_lp - drift_since_ref) / denom if denom > 0 else np.nan
                 Zsig[t] = Z
                 log_ret = lp[t] - buy_lp
-
-                # Phase 1 corrected sell rule:
-                # Z_t > k, momentum weakened, and realized log-return exceeds h.
-                if (
+                trail_drawdown = peak_lp - lp[t]
+                funnel_exit = (
                     el >= delta + 1
                     and not np.isnan(Z)
                     and Z > k
                     and not np.isnan(M)
                     and M <= 0
                     and log_ret > h
-                ):
+                )
+                trailing_exit = (
+                    trailing_stop is not None
+                    and log_ret > h
+                    and trail_drawdown >= trailing_stop
+                )
+
+                # Phase 1 corrected sell rule:
+                # funnel exit or trailing-profit exit, both above the cost threshold.
+                if funnel_exit or trailing_exit:
                     net_mult = net_liquidation_multiplier(
                         prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
                     )
@@ -305,6 +345,7 @@ def run_simulation(
                         "sell_t": t,
                         "gross_log_return": log_ret,
                         "net_multiplier": net_mult,
+                        "exit_reason": "trailing" if trailing_exit else "funnel",
                     })
                     wealth *= net_mult
                     in_pos = False
@@ -324,6 +365,7 @@ def run_simulation(
                         buy_t  = t
                         buy_lp = lp[t]
                         buy_price = prices[t]
+                        peak_lp = buy_lp
                         buy_times.append(t)
 
         # Record state AFTER same-step buy/sell decisions.
@@ -354,9 +396,703 @@ def run_simulation(
         mu_step=mu_step, mu_hat=mu_hat,
         var_step=var_step, sigma_hat=sigma_hat,
         N=n_steps, k=k, h=h, c_buy=c_buy, c_sell=c_sell,
-        clip_noise=clip_noise, drift_process_var=drift_process_var,
+        mode=mode, drift_process_var=drift_process_var,
         drift_init=drift_init, garch_alpha=garch_alpha, garch_beta=garch_beta,
+        max_funnel_lookback=max_funnel_lookback,
+        trailing_stop=trailing_stop,
+        **(extra or {}),
     )
+
+
+# ── Simulation and walk-forward backtest ──────────────────────────────────────
+def run_simulation(
+    mu,
+    sigma,
+    k,
+    delta,
+    n_steps=500,
+    seed=None,
+    c_buy=0.0,
+    c_sell=0.0,
+    clip_noise=False,
+    drift_process_var=1e-7,
+    drift_init=0.0,
+    garch_alpha=0.06,
+    garch_beta=0.90,
+    max_funnel_lookback=60,
+    trailing_stop=0.04,
+):
+    """
+    Simulate the adaptive funnel rule.
+
+    The exact paper model uses Gaussian shocks. Set clip_noise=True only for
+    smoother visualization, not for theory validation.
+    """
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(n_steps)
+    if clip_noise:
+        noise = np.clip(noise, -2.0, 2.0)
+
+    lp = np.empty(n_steps + 1)
+    lp[0] = np.log(100.0)
+    for t in range(n_steps):
+        lp[t + 1] = lp[t] + mu + sigma * noise[t]
+
+    return run_strategy_on_log_prices(
+        lp,
+        k=k,
+        delta=delta,
+        sigma_seed=sigma,
+        c_buy=c_buy,
+        c_sell=c_sell,
+        drift_process_var=drift_process_var,
+        drift_init=drift_init,
+        garch_alpha=garch_alpha,
+        garch_beta=garch_beta,
+        max_funnel_lookback=max_funnel_lookback,
+        trailing_stop=trailing_stop,
+        mode="Simulation",
+        extra={"clip_noise": clip_noise},
+    )
+
+
+def generate_regime_price_path(n_steps=756, seed=7):
+    """Create a real-data-like path with changing drift and volatility regimes."""
+    rng = np.random.default_rng(seed)
+    lp = np.empty(n_steps + 1)
+    lp[0] = np.log(100.0)
+    regimes = [
+        (0.00035, 0.010),
+        (-0.00020, 0.018),
+        (0.00055, 0.012),
+        (-0.00005, 0.024),
+    ]
+    for t in range(n_steps):
+        mu_r, sigma_r = regimes[(t // 126) % len(regimes)]
+        shock = rng.standard_normal()
+        if rng.random() < 0.025:
+            shock += rng.normal(0.0, 2.5)
+        lp[t + 1] = lp[t] + mu_r + sigma_r * shock
+    return lp
+
+
+def estimate_sigma_seed(log_prices):
+    """Use only past returns to initialize adaptive volatility."""
+    returns = np.diff(np.asarray(log_prices, dtype=float))
+    if returns.size < 2:
+        return 0.015
+    sigma = float(np.std(returns, ddof=1))
+    return max(sigma, 1e-4)
+
+
+def load_price_csv(path, price_columns=("Adj Close", "Close", "Price")):
+    """Load adjusted-close style prices from a CSV file without extra packages."""
+    prices = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames is None:
+            raise ValueError("CSV file has no header row.")
+        price_col = next((c for c in price_columns if c in reader.fieldnames), None)
+        if price_col is None:
+            raise ValueError(
+                "CSV must contain one of these columns: "
+                + ", ".join(price_columns)
+            )
+        for row in reader:
+            raw = row.get(price_col, "")
+            if raw:
+                prices.append(float(raw.replace(",", "")))
+    prices = np.asarray(prices, dtype=float)
+    if prices.size < 2 or np.any(prices <= 0):
+        raise ValueError("CSV must contain at least two positive prices.")
+    return np.log(prices)
+
+
+def parse_daily_price_rows(rows, price_columns=("Adj Close", "Close", "Price")):
+    """Convert API/CSV rows into log prices, preserving chronological order."""
+    if not rows:
+        raise ValueError("No price rows were returned.")
+    fieldnames = rows[0].keys()
+    price_col = next((c for c in price_columns if c in fieldnames), None)
+    if price_col is None:
+        raise ValueError(
+            "Price data must contain one of these columns: "
+            + ", ".join(price_columns)
+        )
+
+    cleaned = []
+    for row in rows:
+        raw_price = row.get(price_col, "")
+        raw_date = row.get("Date", "")
+        if raw_price in ("", "null", "None"):
+            continue
+        cleaned.append((raw_date, float(raw_price.replace(",", ""))))
+    cleaned.sort(key=lambda item: item[0])
+
+    prices = np.asarray([price for _, price in cleaned], dtype=float)
+    if prices.size < 2 or np.any(prices <= 0):
+        raise ValueError("Price data must contain at least two positive prices.")
+    return np.log(prices)
+
+
+def fetch_yahoo_daily_log_prices(symbol=DEFAULT_REAL_SYMBOL, years=5):
+    """
+    Fetch daily adjusted closes from Yahoo Finance's public chart endpoint.
+
+    Example symbol: SPY. This endpoint needs no API key.
+    """
+    period2 = int(time.time())
+    period1 = period2 - int(years * 365.25 * 24 * 60 * 60)
+    query_symbol = urllib.parse.quote(symbol.upper())
+    url = (
+        f"https://query1.finance.yahoo.com/v8/finance/chart/{query_symbol}"
+        f"?period1={period1}&period2={period2}"
+        "&interval=1d&events=history&includeAdjustedClose=true"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            text = response.read().decode("utf-8")
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not fetch Yahoo data for {symbol}: {exc}") from exc
+
+    payload = json.loads(text)
+    error = payload.get("chart", {}).get("error")
+    if error:
+        raise ValueError(f"Yahoo returned an error for {symbol}: {error}")
+    results = payload.get("chart", {}).get("result") or []
+    if not results:
+        raise ValueError(f"Yahoo returned no data for symbol {symbol}.")
+
+    indicators = results[0].get("indicators", {})
+    adjclose = indicators.get("adjclose", [{}])[0].get("adjclose")
+    if not adjclose:
+        quote_close = indicators.get("quote", [{}])[0].get("close")
+        adjclose = quote_close
+    prices = np.asarray([p for p in adjclose if p is not None], dtype=float)
+    if prices.size < 2 or np.any(prices <= 0):
+        raise ValueError(f"Yahoo returned insufficient positive prices for {symbol}.")
+    return np.log(prices)
+
+
+def select_walk_forward_params(
+    train_lp,
+    k_grid,
+    delta_grid,
+    c_buy,
+    c_sell,
+    drift_process_var,
+    garch_alpha,
+    garch_beta,
+):
+    """Choose k and delta on the training window only."""
+    sigma_seed = estimate_sigma_seed(train_lp)
+    best = None
+    for k_candidate in k_grid:
+        for delta_candidate in delta_grid:
+            if delta_candidate >= len(train_lp) - 2:
+                continue
+            data = run_strategy_on_log_prices(
+                train_lp,
+                k=k_candidate,
+                delta=delta_candidate,
+                sigma_seed=sigma_seed,
+                c_buy=c_buy,
+                c_sell=c_sell,
+                drift_process_var=drift_process_var,
+                garch_alpha=garch_alpha,
+                garch_beta=garch_beta,
+                mode="Training fold",
+            )
+            metrics = summarize_simulation(data)
+            score = (
+                metrics["mtm_return"]
+                + metrics["max_mtm_drawdown"]
+                + 0.15 * metrics["benchmark_gap"]
+            )
+            if best is None or score > best["score"]:
+                best = {
+                    "k": k_candidate,
+                    "delta": delta_candidate,
+                    "score": score,
+                    "sigma_seed": sigma_seed,
+                }
+    return best
+
+
+def stitch_walk_forward_tests(fold_results, folds, source, mode):
+    """Build one animated out-of-sample path from sequential test folds."""
+    if not fold_results:
+        raise RuntimeError("No walk-forward test folds were produced.")
+
+    concat = {
+        "prices": [],
+        "lp": [],
+        "realized_w": [],
+        "portfolio_w": [],
+        "funnel_mid": [],
+        "funnel_up": [],
+        "funnel_low": [],
+        "Zsig": [],
+        "holding": [],
+        "mu_step": [],
+        "mu_hat": [],
+        "var_step": [],
+        "sigma_hat": [],
+    }
+    buy_times = set()
+    sell_times = set()
+    trade_log = []
+    mtm_capital = 1.0
+    realized_capital = 1.0
+    h = fold_results[0]["h"]
+    c_buy = fold_results[0]["c_buy"]
+    c_sell = fold_results[0]["c_sell"]
+    offset = 0
+
+    for fold_idx, data in enumerate(fold_results):
+        start = 0 if fold_idx == 0 else 1
+        local_len = len(data["prices"]) - start
+
+        for key in ("prices", "lp", "funnel_mid", "funnel_up", "funnel_low",
+                    "Zsig", "holding", "mu_step", "mu_hat", "var_step", "sigma_hat"):
+            concat[key].extend(data[key][start:])
+        concat["realized_w"].extend(data["realized_w"][start:] * realized_capital)
+        concat["portfolio_w"].extend(data["portfolio_w"][start:] * mtm_capital)
+
+        for buy_t in data["buy_times"]:
+            if buy_t >= start:
+                buy_times.add(offset + buy_t - start)
+        for sell_t in data["sell_times"]:
+            if sell_t >= start:
+                sell_times.add(offset + sell_t - start)
+        for trade in data["trade_log"]:
+            trade_log.append({
+                **trade,
+                "buy_t": offset + trade["buy_t"] - start,
+                "sell_t": offset + trade["sell_t"] - start,
+                "fold": fold_idx + 1,
+            })
+
+        realized_capital *= data["realized_w"][-1] / 1000.0
+        mtm_capital *= data["portfolio_w"][-1] / 1000.0
+        offset += local_len
+
+    prices = np.asarray(concat["prices"], dtype=float)
+    buy_hold_w = np.full(prices.size, 1000.0)
+    if prices.size > 1:
+        bh_buy_price = prices[1]
+        for t in range(1, prices.size):
+            buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
+                prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+            )
+
+    summary = {
+        "folds": folds,
+        "oos_return": mtm_capital - 1.0,
+        "avg_fold_return": float(np.mean([f["mtm_return"] for f in folds])),
+        "avg_benchmark_gap": float(np.mean([f["benchmark_gap"] for f in folds])),
+        "avg_sharpe": float(np.nanmean([f["sharpe"] for f in folds])),
+        "avg_calmar": float(np.nanmean([f["calmar"] for f in folds])),
+    }
+    last_fold = folds[-1]
+    return dict(
+        prices=prices,
+        lp=np.asarray(concat["lp"], dtype=float),
+        realized_w=np.asarray(concat["realized_w"], dtype=float),
+        portfolio_w=np.asarray(concat["portfolio_w"], dtype=float),
+        buy_hold_w=buy_hold_w,
+        funnel_mid=np.asarray(concat["funnel_mid"], dtype=float),
+        funnel_up=np.asarray(concat["funnel_up"], dtype=float),
+        funnel_low=np.asarray(concat["funnel_low"], dtype=float),
+        Zsig=np.asarray(concat["Zsig"], dtype=float),
+        holding=np.asarray(concat["holding"], dtype=bool),
+        buy_times=buy_times,
+        sell_times=sell_times,
+        trade_log=trade_log,
+        mu_step=np.asarray(concat["mu_step"], dtype=float),
+        mu_hat=np.asarray(concat["mu_hat"], dtype=float),
+        var_step=np.asarray(concat["var_step"], dtype=float),
+        sigma_hat=np.asarray(concat["sigma_hat"], dtype=float),
+        N=prices.size - 1,
+        k=last_fold["k"],
+        h=h,
+        c_buy=c_buy,
+        c_sell=c_sell,
+        mode=mode,
+        source=source,
+        walk_forward_summary=summary,
+        selected_params={"k": last_fold["k"], "delta": last_fold["delta"]},
+    )
+
+
+def run_walk_forward_demo(
+    full_lp=None,
+    c_buy=0.0,
+    c_sell=0.0,
+    drift_process_var=1e-7,
+    garch_alpha=0.06,
+    garch_beta=0.90,
+    seed=7,
+    source="Offline regime path",
+    train_size=252,
+    test_size=63,
+    k_grid=None,
+    delta_grid=None,
+    stitch_tests=True,
+):
+    """
+    Demonstrate Phase 6 walk-forward logic on a regime-changing offline path.
+
+    Real-data Phase 6 uses the same protocol after loading adjusted close prices.
+    This demo is intentionally local so the app works without internet access.
+    """
+    if full_lp is None:
+        full_lp = generate_regime_price_path(seed=seed)
+    else:
+        full_lp = np.asarray(full_lp, dtype=float)
+    if k_grid is None:
+        k_grid = [0.8, 1.1, 1.4, 1.8, 2.2]
+    if delta_grid is None:
+        delta_grid = [5, 8, 13, 21]
+    folds = []
+    fold_results = []
+    oos_multiplier = 1.0
+    last_data = None
+
+    for train_start in range(0, len(full_lp) - train_size - test_size, test_size):
+        train_end = train_start + train_size
+        test_end = train_end + test_size
+        train_lp = full_lp[train_start:train_end + 1]
+        test_lp = full_lp[train_end:test_end + 1]
+        chosen = select_walk_forward_params(
+            train_lp,
+            k_grid=k_grid,
+            delta_grid=delta_grid,
+            c_buy=c_buy,
+            c_sell=c_sell,
+            drift_process_var=drift_process_var,
+            garch_alpha=garch_alpha,
+            garch_beta=garch_beta,
+        )
+        if chosen is None:
+            continue
+
+        test_data = run_strategy_on_log_prices(
+            test_lp,
+            k=chosen["k"],
+            delta=chosen["delta"],
+            sigma_seed=chosen["sigma_seed"],
+            c_buy=c_buy,
+            c_sell=c_sell,
+            drift_process_var=drift_process_var,
+            garch_alpha=garch_alpha,
+            garch_beta=garch_beta,
+            mode="Walk-forward OOS fold",
+        )
+        metrics = summarize_simulation(test_data)
+        fold_multiplier = test_data["portfolio_w"][-1] / 1000.0
+        oos_multiplier *= fold_multiplier
+        folds.append({
+            "train": (train_start, train_end),
+            "test": (train_end, test_end),
+            "k": chosen["k"],
+            "delta": chosen["delta"],
+            "mtm_return": metrics["mtm_return"],
+            "benchmark_gap": metrics["benchmark_gap"],
+            "max_drawdown": metrics["max_mtm_drawdown"],
+            "sharpe": annualized_sharpe(test_data["portfolio_w"]),
+            "calmar": calmar_ratio(test_data["portfolio_w"]),
+        })
+        fold_results.append(test_data)
+        last_data = test_data
+
+    if last_data is None:
+        raise RuntimeError("Walk-forward demo did not produce any folds.")
+
+    if stitch_tests:
+        return stitch_walk_forward_tests(
+            fold_results,
+            folds,
+            source=source,
+            mode="Walk-forward stitched OOS",
+        )
+
+    summary = {
+        "folds": folds,
+        "oos_return": oos_multiplier - 1.0,
+        "avg_fold_return": float(np.mean([f["mtm_return"] for f in folds])),
+        "avg_benchmark_gap": float(np.mean([f["benchmark_gap"] for f in folds])),
+        "avg_sharpe": float(np.nanmean([f["sharpe"] for f in folds])),
+        "avg_calmar": float(np.nanmean([f["calmar"] for f in folds])),
+    }
+    last_fold = folds[-1]
+    last_data["mode"] = "Walk-forward OOS fold"
+    last_data["source"] = source
+    last_data["walk_forward_summary"] = summary
+    last_data["selected_params"] = {
+        "k": last_fold["k"],
+        "delta": last_fold["delta"],
+    }
+    return last_data
+
+
+def run_online_adaptive_strategy(
+    lp,
+    c_buy=0.0,
+    c_sell=0.0,
+    drift_process_var=1e-7,
+    garch_alpha=0.06,
+    garch_beta=0.90,
+    update_window=5,
+    learning_rate=0.25,
+    k_init=1.2,
+    delta_init=3,
+    max_funnel_lookback=60,
+    trailing_stop=0.04,
+    k_grid=None,
+    delta_grid=None,
+    source="Real daily prices",
+):
+    """
+    Trade one continuous account while updating k and delta from recent data.
+
+    At the start of each new week, the previous week is used to propose
+    parameters. The live parameters are then blended toward that proposal.
+    """
+    lp = np.asarray(lp, dtype=float)
+    if lp.size < update_window * 2 + 2:
+        raise ValueError("Online adaptation needs at least two update windows.")
+    if k_grid is None:
+        k_grid = [0.8, 1.1, 1.4, 1.8, 2.2]
+    if delta_grid is None:
+        delta_grid = [1, 2, 3]
+
+    prices = np.exp(lp)
+    log_returns = np.diff(lp)
+    n_steps = lp.size - 1
+    N = lp.size
+    sigma_seed = estimate_sigma_seed(lp[:update_window + 1])
+    mu_step, mu_hat = kalman_drift_estimates(
+        log_returns,
+        init_mu=0.0,
+        obs_var=sigma_seed * sigma_seed,
+        process_var=drift_process_var,
+    )
+    var_step, sigma_hat = garch_volatility_estimates(
+        log_returns,
+        mu_prior=mu_step,
+        init_var=sigma_seed * sigma_seed,
+        alpha=garch_alpha,
+        beta=garch_beta,
+    )
+    cumulative_drift = np.zeros(N)
+    cumulative_var = np.zeros(N)
+    cumulative_drift[1:] = np.cumsum(mu_step[1:])
+    cumulative_var[1:] = np.cumsum(var_step[1:])
+
+    realized_w  = np.full(N, 1000.0)
+    portfolio_w = np.full(N, 1000.0)
+    buy_hold_w  = np.full(N, 1000.0)
+    Zsig        = np.full(N, np.nan)
+    funnel_mid  = np.full(N, np.nan)
+    funnel_up   = np.full(N, np.nan)
+    funnel_low  = np.full(N, np.nan)
+    holding     = np.zeros(N, dtype=bool)
+    k_path      = np.full(N, float(k_init))
+    delta_path  = np.full(N, int(delta_init), dtype=int)
+    buy_times   = []
+    sell_times  = []
+    trade_log   = []
+    parameter_log = []
+
+    h = profit_threshold(c_buy, c_sell)
+    wealth = 1000.0
+    in_pos = True
+    buy_t = 1
+    buy_lp = lp[1]
+    buy_price = prices[1]
+    peak_lp = buy_lp
+    buy_times.append(1)
+    bh_buy_t = 1
+    bh_buy_price = prices[bh_buy_t]
+
+    current_k = float(k_init)
+    current_delta = int(delta_init)
+
+    for t in range(1, N):
+        # Update parameters at the start of each new week using only past data.
+        if t > update_window and (t - 1) % update_window == 0:
+            train_start = max(0, t - 1 - update_window)
+            train_lp = lp[train_start:t]
+            chosen = select_walk_forward_params(
+                train_lp,
+                k_grid=k_grid,
+                delta_grid=delta_grid,
+                c_buy=c_buy,
+                c_sell=c_sell,
+                drift_process_var=drift_process_var,
+                garch_alpha=garch_alpha,
+                garch_beta=garch_beta,
+            )
+            if chosen is not None:
+                old_k = current_k
+                old_delta = current_delta
+                current_k = (
+                    (1.0 - learning_rate) * current_k
+                    + learning_rate * chosen["k"]
+                )
+                blended_delta = (
+                    (1.0 - learning_rate) * current_delta
+                    + learning_rate * chosen["delta"]
+                )
+                current_delta = int(np.clip(
+                    round(blended_delta),
+                    min(delta_grid),
+                    max(delta_grid),
+                ))
+                parameter_log.append({
+                    "t": t,
+                    "train": (train_start, t - 1),
+                    "suggested_k": chosen["k"],
+                    "suggested_delta": chosen["delta"],
+                    "old_k": old_k,
+                    "old_delta": old_delta,
+                    "new_k": current_k,
+                    "new_delta": current_delta,
+                })
+
+        k_path[t] = current_k
+        delta_path[t] = current_delta
+        M = lp[t] - lp[t - current_delta] if t >= current_delta else np.nan
+        el = t - buy_t if buy_t is not None else 0
+        ref_t = buy_t
+        ref_lp = buy_lp
+        if max_funnel_lookback is not None and el > max_funnel_lookback:
+            ref_t = t - max_funnel_lookback
+            ref_lp = lp[ref_t]
+        if el >= 0:
+            drift_since_ref = cumulative_drift[t] - cumulative_drift[ref_t]
+            var_since_ref = cumulative_var[t] - cumulative_var[ref_t]
+            center = ref_lp + drift_since_ref
+            width = current_k * np.sqrt(var_since_ref)
+            funnel_mid[t] = np.exp(center)
+            funnel_up[t] = np.exp(center + width)
+            funnel_low[t] = np.exp(center - width)
+
+        if in_pos:
+            peak_lp = max(peak_lp, lp[t])
+            if el >= 1:
+                denom = np.sqrt(var_since_ref)
+                Z = (lp[t] - ref_lp - drift_since_ref) / denom if denom > 0 else np.nan
+                Zsig[t] = Z
+                log_ret = lp[t] - buy_lp
+                trail_drawdown = peak_lp - lp[t]
+                funnel_exit = (
+                    el >= current_delta + 1
+                    and not np.isnan(Z)
+                    and Z > current_k
+                    and not np.isnan(M)
+                    and M <= 0
+                    and log_ret > h
+                )
+                trailing_exit = (
+                    trailing_stop is not None
+                    and log_ret > h
+                    and trail_drawdown >= trailing_stop
+                )
+                if funnel_exit or trailing_exit:
+                    net_mult = net_liquidation_multiplier(
+                        prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                    )
+                    trade_log.append({
+                        "buy_t": buy_t,
+                        "sell_t": t,
+                        "gross_log_return": log_ret,
+                        "net_multiplier": net_mult,
+                        "exit_reason": "trailing" if trailing_exit else "funnel",
+                    })
+                    wealth *= net_mult
+                    in_pos = False
+                    sell_times.append(t)
+                    buy_lp = lp[t]
+                    buy_t = t
+                    buy_price = prices[t]
+        else:
+            if buy_t is not None and t >= current_delta + 1 and not np.isnan(M):
+                if el >= 1:
+                    denom = np.sqrt(var_since_ref)
+                    Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
+                    if not np.isnan(Zd) and Zd < -current_k and M >= 0:
+                        in_pos = True
+                        buy_t = t
+                        buy_lp = lp[t]
+                        buy_price = prices[t]
+                        peak_lp = buy_lp
+                        buy_times.append(t)
+
+        holding[t] = in_pos
+        realized_w[t] = wealth
+        if in_pos and buy_t is not None:
+            portfolio_w[t] = wealth * net_liquidation_multiplier(
+                prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+            )
+        else:
+            portfolio_w[t] = wealth
+        if t >= bh_buy_t:
+            buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
+                prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+            )
+
+    return dict(
+        prices=prices, lp=lp,
+        realized_w=realized_w, portfolio_w=portfolio_w, buy_hold_w=buy_hold_w,
+        funnel_mid=funnel_mid, funnel_up=funnel_up, funnel_low=funnel_low,
+        Zsig=Zsig, holding=holding,
+        buy_times=set(buy_times), sell_times=set(sell_times),
+        trade_log=trade_log,
+        mu_step=mu_step, mu_hat=mu_hat,
+        var_step=var_step, sigma_hat=sigma_hat,
+        k_path=k_path, delta_path=delta_path,
+        N=n_steps, k=current_k, h=h, c_buy=c_buy, c_sell=c_sell,
+        mode="Real SPY online adaptive",
+        source=source,
+        parameter_log=parameter_log,
+        selected_params={"k": current_k, "delta": current_delta},
+        online_summary={
+            "updates": len(parameter_log),
+            "learning_rate": learning_rate,
+            "update_window": update_window,
+            "max_funnel_lookback": max_funnel_lookback,
+            "trailing_stop": trailing_stop,
+        },
+    )
+
+
+def run_real_price_walk_forward(
+    symbol=DEFAULT_REAL_SYMBOL,
+    c_buy=0.0,
+    c_sell=0.0,
+    drift_process_var=1e-7,
+    garch_alpha=0.06,
+    garch_beta=0.90,
+):
+    """Fetch daily market data and run one continuous online adaptive test."""
+    full_lp = fetch_yahoo_daily_log_prices(symbol=symbol)
+    data = run_online_adaptive_strategy(
+        full_lp,
+        c_buy=c_buy,
+        c_sell=c_sell,
+        drift_process_var=drift_process_var,
+        garch_alpha=garch_alpha,
+        garch_beta=garch_beta,
+        source=f"Yahoo daily adjusted {symbol.upper()}",
+    )
+    data["symbol"] = symbol.upper()
+    return data
 
 
 # ── Matplotlib canvas ─────────────────────────────────────────────────────────
@@ -413,7 +1149,7 @@ class TradingCanvas(FigureCanvas):
                                  ls=":", zorder=2)
         self.vl_w   = ax_w.axvline(0, color="white", lw=0.8, alpha=0.4, ls="--")
 
-    def render_frame(self, data, t):
+    def render_frame(self, data, t, autoscale=True):
         if data is None:
             return
         end    = t + 1
@@ -426,7 +1162,9 @@ class TradingCanvas(FigureCanvas):
         pw     = data["portfolio_w"]
         bh     = data["buy_hold_w"]
         Zsig   = data["Zsig"]
-        k      = data["k"]
+        k_path = data.get("k_path")
+        if k_path is None:
+            k_path = np.full_like(prices, data["k"], dtype=float)
 
         # ── price panel ──
         self.ln_price.set_data(xs, prices[:end])
@@ -446,20 +1184,23 @@ class TradingCanvas(FigureCanvas):
             fm[:end][np.isfinite(fm[:end])],
         ])
         py = np.concatenate([prices[:end], finite_funnels])
-        self.ax_p.set_xlim(0, max(end, 10))
-        self.ax_p.set_ylim(py.min() * 0.995, py.max() * 1.005)
+        if autoscale:
+            self.ax_p.set_xlim(0, max(end, 10))
+            self.ax_p.set_ylim(py.min() * 0.995, py.max() * 1.005)
 
         # ── Z panel ──
         zv = Zsig[:end].copy()
         self.ln_z.set_data(xs, zv)
-        self.ln_kp.set_data(xs, np.full(end,  k))
-        self.ln_kn.set_data(xs, np.full(end, -k))
+        self.ln_kp.set_data(xs, k_path[:end])
+        self.ln_kn.set_data(xs, -k_path[:end])
         self.vl_z.set_xdata([t, t])
         valid = zv[~np.isnan(zv)]
-        zlo = min(valid.min() if len(valid) else -k, -k) - 0.3
-        zhi = max(valid.max() if len(valid) else  k,  k) + 0.3
-        self.ax_z.set_xlim(0, max(end, 10))
-        self.ax_z.set_ylim(zlo, zhi)
+        k_now = k_path[:end]
+        zlo = min(valid.min() if len(valid) else -1, -np.nanmax(k_now)) - 0.3
+        zhi = max(valid.max() if len(valid) else  1,  np.nanmax(k_now)) + 0.3
+        if autoscale:
+            self.ax_z.set_xlim(0, max(end, 10))
+            self.ax_z.set_ylim(zlo, zhi)
 
         # ── wealth panel ──
         self.ln_rw.set_data(xs, rw[:end])
@@ -469,8 +1210,9 @@ class TradingCanvas(FigureCanvas):
         wv  = np.concatenate([rw[:end], pw[:end], bh[:end]])
         wlo = wv.min(); whi = wv.max()
         wsp = max(whi - wlo, 10)
-        self.ax_w.set_xlim(0, max(end, 10))
-        self.ax_w.set_ylim(wlo - wsp * 0.05, whi + wsp * 0.08)
+        if autoscale:
+            self.ax_w.set_xlim(0, max(end, 10))
+            self.ax_w.set_ylim(wlo - wsp * 0.05, whi + wsp * 0.08)
 
         self.draw_idle()
 
@@ -481,7 +1223,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trading Algorithm — Interactive Phase 5")
+        self.setWindowTitle("Trading Algorithm — Interactive Phase 6")
         self.resize(1280, 760)
         self._apply_dark_palette()
 
@@ -502,8 +1244,20 @@ class MainWindow(QMainWindow):
         root.setSpacing(10)
 
         # ── left: chart ───────────────────────────────────────────────────────
+        chart_panel = QWidget()
+        chart_layout = QVBoxLayout(chart_panel)
+        chart_layout.setContentsMargins(0, 0, 0, 0)
+        chart_layout.setSpacing(4)
         self.canvas = TradingCanvas()
-        root.addWidget(self.canvas, stretch=1)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        self.toolbar.setStyleSheet(
+            f"QToolBar {{ background: {PANEL_BG}; border: 0; }}"
+            f"QToolButton {{ color: {TEXT_C}; background: transparent; }}"
+            "QToolButton:hover { background: #2e3148; }"
+        )
+        chart_layout.addWidget(self.toolbar)
+        chart_layout.addWidget(self.canvas, stretch=1)
+        root.addWidget(chart_panel, stretch=1)
 
         # ── right: controls ───────────────────────────────────────────────────
         ctrl_panel = QWidget()
@@ -599,21 +1353,30 @@ class MainWindow(QMainWindow):
         # Buttons
         btn_grid = QGridLayout()
         btn_grid.setSpacing(5)
-        self.btn_gen   = self._btn("Generate",  self._generate)
-        self.btn_play  = self._btn("▶  Play",   self._toggle_play, enabled=False)
-        self.btn_reset = self._btn("↺  Reset",  self._reset,       enabled=False)
-        btn_grid.addWidget(self.btn_gen,   0, 0, 1, 2)
-        btn_grid.addWidget(self.btn_play,  1, 0)
-        btn_grid.addWidget(self.btn_reset, 1, 1)
+        self.btn_gen   = self._btn("Simulate",      self._generate)
+        self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
+        self.btn_real  = self._btn("Real SPY",      self._real_data)
+        self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
+        self.btn_reset = self._btn("↺  Reset",      self._reset,       enabled=False)
+        self.btn_autoscale = self._btn("Auto-scale ON", self._toggle_autoscale)
+        self.btn_autoscale.setCheckable(True)
+        self.btn_autoscale.setChecked(True)
+        btn_grid.addWidget(self.btn_gen,   0, 0)
+        btn_grid.addWidget(self.btn_wf,    0, 1)
+        btn_grid.addWidget(self.btn_real,  1, 0, 1, 2)
+        btn_grid.addWidget(self.btn_play,  2, 0)
+        btn_grid.addWidget(self.btn_reset, 2, 1)
+        btn_grid.addWidget(self.btn_autoscale, 3, 0, 1, 2)
         play_layout.addLayout(btn_grid)
         ctrl_layout.addWidget(play_box)
 
         # Legend
         legend_box = QGroupBox("Legend")
         legend_box.setStyleSheet(self._group_style())
-        leg_layout = QVBoxLayout(legend_box)
-        leg_layout.setSpacing(2)
-        for color, text in [
+        leg_layout = QGridLayout(legend_box)
+        leg_layout.setHorizontalSpacing(8)
+        leg_layout.setVerticalSpacing(2)
+        legend_items = [
             (BLUE,   "Price path"),
             (F_UPPER, "Upper funnel"),
             (F_LOWER, "Lower funnel"),
@@ -622,14 +1385,15 @@ class MainWindow(QMainWindow):
             (TEAL,   "Z statistic / buy-hold"),
             (AMBER,  "Realized wealth"),
             (PURPLE, "Mark-to-market value"),
-        ]:
+        ]
+        for idx, (color, text) in enumerate(legend_items):
             row = QHBoxLayout()
             dot = QLabel("●")
             dot.setStyleSheet(f"color:{color};font-size:14px;")
             lbl = QLabel(text)
             lbl.setStyleSheet(f"color:{TEXT_C};font-size:10px;")
             row.addWidget(dot); row.addWidget(lbl); row.addStretch()
-            leg_layout.addLayout(row)
+            leg_layout.addLayout(row, idx % 4, idx // 4)
         ctrl_layout.addWidget(legend_box)
 
         # Live stats group
@@ -642,6 +1406,8 @@ class MainWindow(QMainWindow):
 
         self.stat_labels = {}
         stat_defs = [
+            ("mode",     "Mode"),
+            ("source",   "Source"),
             ("t",        "t"),
             ("price",    "Price"),
             ("pos",      "Position"),
@@ -658,6 +1424,9 @@ class MainWindow(QMainWindow):
             ("dd",       "Max DD"),
             ("trades",   "Trades"),
             ("exposure", "Exposure"),
+            ("sharpe",   "Sharpe"),
+            ("calmar",   "Calmar"),
+            ("wf_ret",   "Learn/OOS"),
             ("h",        "h"),
         ]
         for idx, (key, caption) in enumerate(stat_defs):
@@ -699,6 +1468,12 @@ class MainWindow(QMainWindow):
         b.clicked.connect(slot)
         return b
 
+    def _toggle_autoscale(self):
+        enabled = self.btn_autoscale.isChecked()
+        self.btn_autoscale.setText("Auto-scale ON" if enabled else "Auto-scale OFF")
+        if enabled and self.sim_data is not None:
+            self._set_frame(self.current_t)
+
     def _tick(self):
         if self.sim_data is None:
             return
@@ -722,6 +1497,45 @@ class MainWindow(QMainWindow):
             clip_noise=False,
             drift_process_var=p["drift_q"] * 1e-8,
         )
+        self.sim_data = data
+        self.scrubber.setMaximum(data["N"])
+        self.scrubber.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._set_frame(0)
+
+    def _walk_forward(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+        data = run_walk_forward_demo(
+            c_buy=p["cost"],
+            c_sell=p["cost"],
+            drift_process_var=p["drift_q"] * 1e-8,
+        )
+        self.sim_data = data
+        self.scrubber.setMaximum(data["N"])
+        self.scrubber.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._set_frame(0)
+
+    def _real_data(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+        try:
+            data = run_real_price_walk_forward(
+                symbol=DEFAULT_REAL_SYMBOL,
+                c_buy=p["cost"],
+                c_sell=p["cost"],
+                drift_process_var=p["drift_q"] * 1e-8,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Real data fetch failed", str(exc))
+            return
         self.sim_data = data
         self.scrubber.setMaximum(data["N"])
         self.scrubber.setEnabled(True)
@@ -754,7 +1568,11 @@ class MainWindow(QMainWindow):
         self.scrubber.blockSignals(False)
         N = self.sim_data["N"] if self.sim_data else 0
         self.scrub_lbl.setText(f"{t} / {N}")
-        self.canvas.render_frame(self.sim_data, t)
+        self.canvas.render_frame(
+            self.sim_data,
+            t,
+            autoscale=self.btn_autoscale.isChecked(),
+        )
 
         if self.sim_data is not None:
             d   = self.sim_data
@@ -766,7 +1584,12 @@ class MainWindow(QMainWindow):
             zn  = d["Zsig"][t]
             zs  = f"{zn:+.2f}" if not np.isnan(zn) else "n/a"
             pos = "Holding" if d["holding"][t] else "Cash"
+            wf_summary = d.get("walk_forward_summary")
+            sharpe = annualized_sharpe(d["portfolio_w"][:t + 1])
+            calmar = calmar_ratio(d["portfolio_w"][:t + 1])
 
+            self.stat_labels["mode"].setText(d.get("mode", "Simulation"))
+            self.stat_labels["source"].setText(d.get("source", "Generated path"))
             self.stat_labels["t"].setText(str(t))
             self.stat_labels["price"].setText(f"${d['prices'][t]:.2f}")
             self.stat_labels["wealth"].setText(f"${rw:.2f}")
@@ -784,6 +1607,18 @@ class MainWindow(QMainWindow):
             self.stat_labels["trades"].setText(str(metrics["completed_trades"]))
             self.stat_labels["exposure"].setText(
                 f"{metrics['exposure'] * 100:.0f}%")
+            self.stat_labels["sharpe"].setText(
+                f"{sharpe:.2f}" if np.isfinite(sharpe) else "n/a")
+            self.stat_labels["calmar"].setText(
+                f"{calmar:.2f}" if np.isfinite(calmar) else "n/a")
+            if wf_summary:
+                self.stat_labels["wf_ret"].setText(
+                    f"{wf_summary['oos_return'] * 100:+.2f}%")
+            elif d.get("online_summary"):
+                self.stat_labels["wf_ret"].setText(
+                    f"{d['online_summary']['updates']} upd")
+            else:
+                self.stat_labels["wf_ret"].setText("n/a")
             self.stat_labels["z"].setText(zs)
             self.stat_labels["mu_hat"].setText(f"{d['mu_hat'][t]:+.5f}")
             self.stat_labels["sigma_hat"].setText(f"{d['sigma_hat'][t]:.4f}")

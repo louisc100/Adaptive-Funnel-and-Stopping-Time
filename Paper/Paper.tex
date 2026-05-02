@@ -146,6 +146,36 @@ Equivalently,
 
 The rule says: sell only after the price crosses the upper funnel boundary, local momentum has weakened, and the trade is profitable after costs.
 
+\section{Practical Bounded-Funnel and Trailing Exit}
+
+The since-entry funnel above is mathematically clean, but in long upward trends its cumulative variance \(V(t)\) can grow so large that the upper boundary becomes difficult to cross. In implementation, we therefore use a bounded reference window for the diagnostic funnel. Given a maximum lookback \(L\), define
+\[
+\rho_t=\max\{\tau_b,t-L\}.
+\]
+The displayed and tested funnel may then use
+\[
+C_{\rho_t}(t)=X_{\rho_t}+\sum_{s=\rho_t+1}^{t}\mu_s,
+\qquad
+V_{\rho_t}(t)=\sum_{s=\rho_t+1}^{t}\sigma_s^2,
+\]
+and
+\[
+Z_t^{(L)}=\frac{X_t-C_{\rho_t}(t)}{\sqrt{V_{\rho_t}(t)}}.
+\]
+This keeps the diagnostic funnel from widening indefinitely while preserving the original entry price \(\tau_b\) for profit accounting.
+
+We also add a trailing-profit exit. Let
+\[
+H_t=\max_{\tau_b\leq u\leq t}X_u
+\]
+be the highest log-price observed since entry, and let \(a>0\) be a trailing drawdown threshold. A voluntary trailing exit is allowed when
+\[
+H_t-X_t\geq a
+\qquad\text{and}\qquad
+X_t-X_{\tau_b}>h.
+\]
+Thus the complete practical sell rule exits when either the bounded-funnel sell condition holds or the trailing-profit condition holds. In both cases, the transaction-cost profit condition \(X_t-X_{\tau_b}>h\) is retained, so the no-realized-loss property for completed voluntary exits is unchanged.
+
 \section{Trading Cycle and Re-Entry Rule}
 
 The stopping rule above describes when an existing long position is exited. To turn the rule into a repeated trading strategy, we also specify how the strategy re-enters after a completed sale.
@@ -423,6 +453,65 @@ This form is important: since \(C_\tau(t)\) already contains the anchor \(X_\tau
 
 Adaptive volatility makes the funnel breathe. After large shocks, \(V_\tau(t)\) grows faster and the upper and lower boundaries widen; during quieter periods, the funnel narrows. This usually reduces false boundary crossings in turbulent regimes and makes the visual funnel closer to how market uncertainty changes over time.
 
+\section{Phase 6 Walk-Forward Backtesting}
+
+Phase 6 changes the evaluation question from ``does the rule behave correctly on a controlled path?'' to ``does the adaptive rule survive out-of-sample testing?'' The essential requirement is that parameters are chosen using only past data and then evaluated on future data that was not used for selection.
+
+Let the observed price history be divided into ordered train/test folds. For fold \(j\), write
+\[
+\mathcal T_j=\{t_j,\ldots,t_j+L_{\mathrm{train}}\}
+\]
+for the training window and
+\[
+\mathcal O_j=\{t_j+L_{\mathrm{train}},\ldots,t_j+L_{\mathrm{train}}+L_{\mathrm{test}}\}
+\]
+for the following out-of-sample window. Candidate parameters such as \(k\), \(\delta\), Kalman process variance \(q\), and GARCH parameters may be compared on \(\mathcal T_j\), but once the best candidate is selected, it is frozen before running the strategy on \(\mathcal O_j\).
+
+For a candidate parameter vector \(\theta\), define a training objective such as
+\[
+J_j(\theta)
+=
+R_{j,\mathrm{train}}^m(\theta)
++D_{j,\mathrm{train}}^m(\theta)
++\lambda G_{j,\mathrm{train}}(\theta),
+\]
+where \(R^m\) is mark-to-market return, \(D^m\leq 0\) is maximum drawdown, \(G\) is the benchmark gap, and \(\lambda\geq 0\) controls how strongly benchmark-relative performance is rewarded. The selected parameter is
+\[
+\hat\theta_j=\arg\max_{\theta\in\Theta}J_j(\theta).
+\]
+The out-of-sample fold result is then computed by running the strategy on \(\mathcal O_j\) using \(\hat\theta_j\), with the adaptive drift and volatility filters initialized only from information available at the beginning of that test fold.
+
+The out-of-sample fold multipliers can be compounded:
+\[
+M_{\mathrm{OOS}}=\prod_j \frac{W_{j,\mathrm{end}}^m}{W_{j,\mathrm{start}}^m},
+\qquad
+R_{\mathrm{OOS}}=M_{\mathrm{OOS}}-1.
+\]
+Additional diagnostics should include maximum drawdown, exposure, completed trade count, benchmark gap, Sharpe ratio, and Calmar ratio. Using wealth values \(W_t\), the annualized Sharpe ratio with zero risk-free rate is
+\[
+\mathrm{Sharpe}
+=
+\sqrt{252}\,
+\frac{\bar r}{s_r},
+\qquad
+r_t=\frac{W_t-W_{t-1}}{W_{t-1}},
+\]
+and the Calmar ratio is
+\[
+\mathrm{Calmar}
+=
+\frac{R_{\mathrm{ann}}}{|D_{\min}|}.
+\]
+
+This protocol does not prove profitability. Its purpose is more modest and more important: it prevents accidental lookahead bias, separates parameter fitting from evaluation, and gives a fairer comparison against buy-and-hold. In the implementation, a local regime-changing path is used as an offline walk-forward demonstration. The same logic is also applied to real daily market prices fetched from a public chart API or loaded from an adjusted-close CSV file. The data source, symbol, sampling frequency, and whether prices are adjusted for dividends and splits should be reported with every real-data result.
+
+For the real daily-price visualization, the implementation uses a continuous online variant rather than restarting the strategy at every fold. The strategy begins with initial parameters \(\theta_0=(k_0,\delta_0)\). At the start of each new trading week, the most recent week of daily prices is used to compute a suggested parameter vector \(\tilde\theta_j\). The live parameter is then updated by smoothing:
+\[
+\theta_j=(1-\rho)\theta_{j-1}+\rho\tilde\theta_j,
+\qquad 0<\rho\leq 1.
+\]
+For integer-valued parameters such as \(\delta\), the smoothed value is rounded and constrained to the candidate grid. The next week is traded using \(\theta_j\), while the position state, realized wealth, and mark-to-market wealth continue without reset. This gives a more realistic animation: one continuous trading account learns from recent data while avoiding lookahead.
+
 \section{Discussion and Limitations}
 
 The strategy enforces a no-realized-loss condition on completed voluntary exits. However, this does not imply that the strategy is risk-free. The main limitations are:
@@ -435,7 +524,7 @@ The strategy enforces a no-realized-loss condition on completed voluntary exits.
     \item \textbf{Parameter estimation error:} the drift \(\mu\) is difficult to estimate accurately.
 \end{itemize}
 
-Future phases should test the adaptive funnel on real data using walk-forward, out-of-sample evaluation rather than parameters selected on the full sample.
+Future phases should replace the offline demonstration path with cleaned real adjusted-close data and report the full walk-forward fold table.
 
 \section{Conclusion}
 
