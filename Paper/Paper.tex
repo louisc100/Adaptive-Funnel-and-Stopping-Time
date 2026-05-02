@@ -52,7 +52,13 @@ be the information available at time \(t\).
 
 \section{Deviation Signal and Predictive Funnel}
 
-Fix a buying time \(\tau_b\). In the fixed-parameter baseline model, define the predictive center and cumulative variance by
+Fix a buying time \(\tau_b\). More generally, let \(\mu_s\) and \(\sigma_s\) denote the drift and volatility estimates used for step \(s\). Define the predictive center and cumulative variance by
+\[
+C(t)=X_{\tau_b}+\sum_{s=\tau_b+1}^{t}\mu_s,
+\qquad
+V(t)=\sum_{s=\tau_b+1}^{t}\sigma_s^2.
+\]
+In the fixed-parameter baseline model, \(\mu_s\equiv\mu\) and \(\sigma_s\equiv\sigma\), so these reduce to
 \[
 C(t)=X_{\tau_b}+\mu(t-\tau_b),
 \qquad
@@ -298,6 +304,40 @@ E_T=\frac{1}{T+1}\sum_{t=0}^T H_t
 measures the fraction of time capital is exposed to the asset. Together, \(R_T^r\), \(R_T^m\), \(R_T^{\mathrm{bh}}\), \(G_T\), \(D_{\min}^m\), the number of completed trades, and \(E_T\) form the Phase 2 evaluation dashboard.
 
 The simulation should use a Gaussian log-return model when validating the theory. If clipped shocks are used for visualization, they should be labelled as a visualization choice rather than as the exact model assumed in the paper.
+
+\section{Phase 3 Funnel Visualization}
+
+Phase 3 makes the stopping rule visually explicit. Instead of plotting only the price path and the derived statistic \(Z_t\), the simulation also plots the predictive funnel directly on the price chart.
+
+After a reference time \(\tau\), which is either the current buying time while holding or the most recent selling time while in cash, define the log-funnel center and cumulative variance by
+\[
+C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\mu_s,
+\qquad
+V_\tau(t)=\sum_{s=\tau+1}^{t}\sigma_s^2.
+\]
+In the fixed-parameter simulation, where \(\mu_s\equiv\mu\) and \(\sigma_s\equiv\sigma\), this is equivalent to \(C_\tau(t)=X_\tau+\mu(t-\tau)\) and \(V_\tau(t)=\sigma^2(t-\tau)\).
+
+The log-funnel boundaries are
+\[
+U_\tau(t)=C_\tau(t)+k\sqrt{V_\tau(t)},
+\qquad
+L_\tau(t)=C_\tau(t)-k\sqrt{V_\tau(t)},
+\qquad t\geq \tau.
+\]
+The corresponding price-level curves are
+\[
+\exp(C_\tau(t)),\qquad \exp(U_\tau(t)),\qquad \exp(L_\tau(t)).
+\]
+These are the curves displayed in the price panel.
+
+While the strategy is holding the asset, the upper boundary \(\exp(U_{\tau_b}(t))\) is the relevant exit boundary. A sell can occur only after the price crosses this upper boundary, momentum has weakened, and the profit-threshold condition is satisfied. While the strategy is in cash, the lower boundary \(\exp(L_{\tau_s}(t))\) is the relevant re-entry boundary. A buy can occur only after the price crosses below this lower boundary and local momentum recovers.
+
+Whenever the strategy sells or buys, the reference time is reset. Thus the plotted funnel is not one fixed band drawn from \(t=0\); it is a sequence of local predictive funnels, each anchored at the current trade reference point. This visualization is useful because it separates three ideas that are otherwise easy to confuse:
+\begin{enumerate}
+    \item the expected log-price path, shown by the funnel center;
+    \item statistically unusual movement, shown by crossing the upper or lower boundary;
+    \item executable trading decisions, which also require momentum and, for sells, the profit threshold.
+\end{enumerate}
 
 \section{Discussion and Limitations}
 

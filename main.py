@@ -1,12 +1,13 @@
 """
-Interactive Trading Algorithm — Phase 2 Benchmark Version
+Interactive Trading Algorithm — Phase 3 Funnel Visualization Version
 -----------------------------------------------------
 A PyQt5 app with:
   - Sliders for sigma, mu, k, delta, transaction cost, speed
   - Generate / Play / Pause / Reset buttons
   - Time scrubber to seek anywhere in the simulation
   - Three live-updating panels:
-      1. Price path  (buy ^ green, sell v red)
+      1. Price path with predictive funnel boundaries
+         (buy ^ green, sell v red)
       2. Z deviation signal  (+/- k dashed thresholds)
       3. Wealth curves:
            realized wealth       (amber staircase)
@@ -14,7 +15,7 @@ A PyQt5 app with:
            buy-and-hold benchmark (teal dotted)
   - Live stats sidebar (t, price, wealth, return, drawdown, benchmark gap)
 
-Phase 2 includes:
+Phase 3 includes:
   1. Explicit profit threshold h = log((1+c_buy)/(1-c_sell)).
   2. Sell condition requires log_return > h.
   3. Transaction-cost-adjusted realized wealth update.
@@ -22,6 +23,7 @@ Phase 2 includes:
   5. Holding state is recorded after same-step decisions.
   6. Gaussian shocks are no longer clipped by default.
   7. Completed trade records, drawdown, exposure, and benchmark-gap metrics.
+  8. Visible center, upper, and lower funnel paths on the price chart.
 
 Dependencies:
     pip install numpy matplotlib PyQt5
@@ -143,10 +145,18 @@ def run_simulation(
     prices = np.exp(lp)
 
     N = n_steps + 1
+    cumulative_drift = np.zeros(N)
+    cumulative_var = np.zeros(N)
+    cumulative_drift[1:] = np.cumsum(np.full(n_steps, mu))
+    cumulative_var[1:] = np.cumsum(np.full(n_steps, sigma * sigma))
+
     realized_w  = np.full(N, 1000.0)
     portfolio_w = np.full(N, 1000.0)
     buy_hold_w  = np.full(N, 1000.0)
     Zsig        = np.full(N, np.nan)
+    funnel_mid  = np.full(N, np.nan)
+    funnel_up   = np.full(N, np.nan)
+    funnel_low  = np.full(N, np.nan)
     holding     = np.zeros(N, dtype=bool)
     buy_times   = []
     sell_times  = []
@@ -167,12 +177,20 @@ def run_simulation(
 
     for t in range(1, N):
         M = lp[t] - lp[t - delta] if t >= delta else np.nan
+        el = t - buy_t if buy_t is not None else 0
+        if el >= 0:
+            drift_since_ref = cumulative_drift[t] - cumulative_drift[buy_t]
+            var_since_ref = cumulative_var[t] - cumulative_var[buy_t]
+            center = buy_lp + drift_since_ref
+            width = k * np.sqrt(var_since_ref)
+            funnel_mid[t] = np.exp(center)
+            funnel_up[t] = np.exp(center + width)
+            funnel_low[t] = np.exp(center - width)
 
         if in_pos:
-            el = t - buy_t
             if el >= 1:
-                denom = sigma * np.sqrt(el)
-                Z = (lp[t] - buy_lp - mu * el) / denom if denom > 0 else np.nan
+                denom = np.sqrt(var_since_ref)
+                Z = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
                 Zsig[t] = Z
                 log_ret = lp[t] - buy_lp
 
@@ -205,10 +223,9 @@ def run_simulation(
         else:
             # Symmetric re-entry rule: buy after a lower-funnel deviation and momentum recovery.
             if buy_t is not None and t >= delta + 1 and not np.isnan(M):
-                el = t - buy_t
                 if el >= 1:
-                    denom = sigma * np.sqrt(el)
-                    Zd = (lp[t] - buy_lp - mu * el) / denom if denom > 0 else np.nan
+                    denom = np.sqrt(var_since_ref)
+                    Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
                     if not np.isnan(Zd) and Zd < -k and M >= 0:
                         in_pos = True
                         buy_t  = t
@@ -237,6 +254,7 @@ def run_simulation(
     return dict(
         prices=prices, lp=lp,
         realized_w=realized_w, portfolio_w=portfolio_w, buy_hold_w=buy_hold_w,
+        funnel_mid=funnel_mid, funnel_up=funnel_up, funnel_low=funnel_low,
         Zsig=Zsig, holding=holding,
         buy_times=set(buy_times), sell_times=set(sell_times),
         trade_log=trade_log,
@@ -276,6 +294,12 @@ class TradingCanvas(FigureCanvas):
         ax_p, ax_z, ax_w = self.ax_p, self.ax_z, self.ax_w
 
         self.ln_price,  = ax_p.plot([], [], color=BLUE,  lw=1.4, zorder=2)
+        self.ln_fu,     = ax_p.plot([], [], color=RED,   lw=0.9, ls="--",
+                                     alpha=0.72, zorder=1)
+        self.ln_fl,     = ax_p.plot([], [], color=GREEN, lw=0.9, ls="--",
+                                     alpha=0.72, zorder=1)
+        self.ln_fm,     = ax_p.plot([], [], color=TEXT_C, lw=0.75, ls=":",
+                                     alpha=0.45, zorder=1)
         self.sc_buy     = ax_p.scatter([], [], marker="^", color=GREEN, s=70, zorder=5)
         self.sc_sell    = ax_p.scatter([], [], marker="v", color=RED,   s=70, zorder=5)
         self.vl_p       = ax_p.axvline(0, color="white", lw=0.8, alpha=0.4, ls="--")
@@ -299,6 +323,9 @@ class TradingCanvas(FigureCanvas):
         end    = t + 1
         xs     = np.arange(end)
         prices = data["prices"]
+        fu     = data["funnel_up"]
+        fl     = data["funnel_low"]
+        fm     = data["funnel_mid"]
         rw     = data["realized_w"]
         pw     = data["portfolio_w"]
         bh     = data["buy_hold_w"]
@@ -307,6 +334,9 @@ class TradingCanvas(FigureCanvas):
 
         # ── price panel ──
         self.ln_price.set_data(xs, prices[:end])
+        self.ln_fu.set_data(xs, fu[:end])
+        self.ln_fl.set_data(xs, fl[:end])
+        self.ln_fm.set_data(xs, fm[:end])
         bxs = [b for b in data["buy_times"]  if b < end]
         sxs = [s for s in data["sell_times"] if s < end]
         self.sc_buy.set_offsets(
@@ -314,7 +344,12 @@ class TradingCanvas(FigureCanvas):
         self.sc_sell.set_offsets(
             np.c_[sxs, prices[sxs]] if sxs else np.empty((0, 2)))
         self.vl_p.set_xdata([t, t])
-        py = prices[:end]
+        finite_funnels = np.concatenate([
+            fu[:end][np.isfinite(fu[:end])],
+            fl[:end][np.isfinite(fl[:end])],
+            fm[:end][np.isfinite(fm[:end])],
+        ])
+        py = np.concatenate([prices[:end], finite_funnels])
         self.ax_p.set_xlim(0, max(end, 10))
         self.ax_p.set_ylim(py.min() * 0.995, py.max() * 1.005)
 
@@ -350,7 +385,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trading Algorithm — Interactive Phase 2")
+        self.setWindowTitle("Trading Algorithm — Interactive Phase 3")
         self.resize(1280, 760)
         self._apply_dark_palette()
 
@@ -483,6 +518,8 @@ class MainWindow(QMainWindow):
         leg_layout.setSpacing(2)
         for color, text in [
             (BLUE,   "Price path"),
+            (RED,    "Upper funnel"),
+            (GREEN,  "Lower funnel"),
             (GREEN,  "Buy signal"),
             (RED,    "Sell signal"),
             (TEAL,   "Z statistic / buy-hold"),
