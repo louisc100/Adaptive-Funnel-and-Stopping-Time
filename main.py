@@ -55,6 +55,8 @@ RED      = "#D85A30"
 AMBER    = "#EF9F27"
 PURPLE   = "#7F77DD"
 TEAL     = "#9FE1CB"
+F_UPPER  = "#F2B84B"
+F_LOWER  = "#6CC6FF"
 
 
 # ── Phase 1 utilities ─────────────────────────────────────────────────────────
@@ -294,9 +296,9 @@ class TradingCanvas(FigureCanvas):
         ax_p, ax_z, ax_w = self.ax_p, self.ax_z, self.ax_w
 
         self.ln_price,  = ax_p.plot([], [], color=BLUE,  lw=1.4, zorder=2)
-        self.ln_fu,     = ax_p.plot([], [], color=RED,   lw=0.9, ls="--",
+        self.ln_fu,     = ax_p.plot([], [], color=F_UPPER, lw=0.9, ls="--",
                                      alpha=0.72, zorder=1)
-        self.ln_fl,     = ax_p.plot([], [], color=GREEN, lw=0.9, ls="--",
+        self.ln_fl,     = ax_p.plot([], [], color=F_LOWER, lw=0.9, ls="--",
                                      alpha=0.72, zorder=1)
         self.ln_fm,     = ax_p.plot([], [], color=TEXT_C, lw=0.75, ls=":",
                                      alpha=0.45, zorder=1)
@@ -518,8 +520,8 @@ class MainWindow(QMainWindow):
         leg_layout.setSpacing(2)
         for color, text in [
             (BLUE,   "Price path"),
-            (RED,    "Upper funnel"),
-            (GREEN,  "Lower funnel"),
+            (F_UPPER, "Upper funnel"),
+            (F_LOWER, "Lower funnel"),
             (GREEN,  "Buy signal"),
             (RED,    "Sell signal"),
             (TEAL,   "Z statistic / buy-hold"),
