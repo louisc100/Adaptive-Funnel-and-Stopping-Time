@@ -1,5 +1,5 @@
 """
-Interactive Trading Algorithm — Phase 4 Adaptive Drift Version
+Interactive Trading Algorithm — Phase 5 Adaptive Volatility Version
 -----------------------------------------------------
 A PyQt5 app with:
   - Sliders for sigma, true mu, adaptive drift strength, k, delta, transaction cost, speed
@@ -15,7 +15,7 @@ A PyQt5 app with:
            buy-and-hold benchmark (teal dotted)
   - Live stats sidebar (t, price, wealth, return, drawdown, benchmark gap)
 
-Phase 4 includes:
+Phase 5 includes:
   1. Explicit profit threshold h = log((1+c_buy)/(1-c_sell)).
   2. Sell condition requires log_return > h.
   3. Transaction-cost-adjusted realized wealth update.
@@ -25,6 +25,7 @@ Phase 4 includes:
   7. Completed trade records, drawdown, exposure, and benchmark-gap metrics.
   8. Visible center, upper, and lower funnel paths on the price chart.
   9. Kalman-filtered drift estimates used by the predictive funnel.
+ 10. GARCH-style conditional volatility forecasts used by the funnel width.
 
 Dependencies:
     pip install numpy matplotlib PyQt5
@@ -149,6 +150,46 @@ def kalman_drift_estimates(log_returns, init_mu, obs_var, process_var):
     return mu_prior, mu_filtered
 
 
+def garch_volatility_estimates(
+    log_returns,
+    mu_prior,
+    init_var,
+    alpha=0.06,
+    beta=0.90,
+):
+    """
+    Estimate one-step conditional variance with a GARCH(1,1)-style recursion.
+
+    var_prior[s] is the variance forecast used for return s before seeing it.
+    The update uses the squared innovation after return s is observed.
+    """
+    n_steps = len(log_returns)
+    init_var = max(float(init_var), 1e-12)
+    alpha = min(max(float(alpha), 0.0), 0.98)
+    beta = min(max(float(beta), 0.0), 0.98)
+    if alpha + beta >= 0.999:
+        scale = 0.999 / (alpha + beta)
+        alpha *= scale
+        beta *= scale
+
+    omega = (1.0 - alpha - beta) * init_var
+    var_prior = np.zeros(n_steps + 1)
+    sigma_hat = np.zeros(n_steps + 1)
+    next_var = init_var
+    var_prior[0] = init_var
+    sigma_hat[0] = np.sqrt(init_var)
+
+    for step, r in enumerate(log_returns, start=1):
+        forecast_var = max(next_var, 1e-12)
+        var_prior[step] = forecast_var
+        sigma_hat[step] = np.sqrt(forecast_var)
+
+        innovation = r - mu_prior[step]
+        next_var = omega + alpha * innovation * innovation + beta * forecast_var
+
+    return var_prior, sigma_hat
+
+
 # ── Simulation ────────────────────────────────────────────────────────────────
 def run_simulation(
     mu,
@@ -162,6 +203,8 @@ def run_simulation(
     clip_noise=False,
     drift_process_var=1e-7,
     drift_init=0.0,
+    garch_alpha=0.06,
+    garch_beta=0.90,
 ):
     """
     Simulate the adaptive funnel rule.
@@ -188,10 +231,17 @@ def run_simulation(
         obs_var=sigma * sigma,
         process_var=drift_process_var,
     )
+    var_step, sigma_hat = garch_volatility_estimates(
+        log_returns,
+        mu_prior=mu_step,
+        init_var=sigma * sigma,
+        alpha=garch_alpha,
+        beta=garch_beta,
+    )
     cumulative_drift = np.zeros(N)
     cumulative_var = np.zeros(N)
     cumulative_drift[1:] = np.cumsum(mu_step[1:])
-    cumulative_var[1:] = np.cumsum(np.full(n_steps, sigma * sigma))
+    cumulative_var[1:] = np.cumsum(var_step[1:])
 
     realized_w  = np.full(N, 1000.0)
     portfolio_w = np.full(N, 1000.0)
@@ -302,9 +352,10 @@ def run_simulation(
         buy_times=set(buy_times), sell_times=set(sell_times),
         trade_log=trade_log,
         mu_step=mu_step, mu_hat=mu_hat,
+        var_step=var_step, sigma_hat=sigma_hat,
         N=n_steps, k=k, h=h, c_buy=c_buy, c_sell=c_sell,
         clip_noise=clip_noise, drift_process_var=drift_process_var,
-        drift_init=drift_init,
+        drift_init=drift_init, garch_alpha=garch_alpha, garch_beta=garch_beta,
     )
 
 
@@ -430,7 +481,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Trading Algorithm — Interactive Phase 4")
+        self.setWindowTitle("Trading Algorithm — Interactive Phase 5")
         self.resize(1280, 760)
         self._apply_dark_palette()
 
@@ -596,6 +647,7 @@ class MainWindow(QMainWindow):
             ("pos",      "Position"),
             ("z",        "Z"),
             ("mu_hat",   "mu hat"),
+            ("sigma_hat", "sigma hat"),
             ("wealth",   "Realized W"),
             ("mtm",      "MtM W"),
             ("bh",       "Buy-hold W"),
@@ -734,6 +786,7 @@ class MainWindow(QMainWindow):
                 f"{metrics['exposure'] * 100:.0f}%")
             self.stat_labels["z"].setText(zs)
             self.stat_labels["mu_hat"].setText(f"{d['mu_hat'][t]:+.5f}")
+            self.stat_labels["sigma_hat"].setText(f"{d['sigma_hat'][t]:.4f}")
             self.stat_labels["h"].setText(f"{d['h']:.5f}")
             self.stat_labels["pos"].setText(pos)
 

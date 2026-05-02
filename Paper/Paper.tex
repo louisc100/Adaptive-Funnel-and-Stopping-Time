@@ -383,7 +383,45 @@ C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
 \qquad
 V_\tau(t)=\sum_{s=\tau+1}^{t}\sigma^2.
 \]
-The simulation initializes the filter from a neutral prior rather than the true simulated drift. The same upper-funnel sell rule, lower-funnel re-entry rule, momentum filter, and transaction-cost profit threshold are then applied using this adaptive center. Phase 5 will keep the same structure but replace the fixed \(\sigma^2\) in \(V_\tau(t)\) with an adaptive volatility estimate.
+The simulation initializes the filter from a neutral prior rather than the true simulated drift. The same upper-funnel sell rule, lower-funnel re-entry rule, momentum filter, and transaction-cost profit threshold are then applied using this adaptive center.
+
+\section{Phase 5 Adaptive Volatility Estimation}
+
+Phase 5 removes the fixed-width volatility assumption from the funnel. Instead of using \(V_\tau(t)=\sigma^2(t-\tau)\), the strategy estimates a one-step-ahead conditional variance and accumulates those forecasts over the life of each local funnel.
+
+Let the innovation relative to the drift forecast be
+\[
+e_s=r_s-\hat\mu_{s|s-1}.
+\]
+A GARCH(1,1)-style conditional variance recursion is
+\[
+\hat\sigma^2_{s|s-1}=h_s,
+\]
+\[
+h_{s+1}
+=
+\omega+\alpha e_s^2+\beta h_s,
+\qquad
+\alpha\geq 0,\quad \beta\geq 0,\quad \alpha+\beta<1.
+\]
+The parameter \(\alpha\) controls how strongly the variance forecast reacts to the most recent shock, while \(\beta\) controls volatility persistence. In the simulation, \(\omega\) is chosen from an initial long-run variance level:
+\[
+\omega=(1-\alpha-\beta)\bar\sigma^2.
+\]
+
+To avoid lookahead bias, the funnel for step \(s\) uses \(\hat\sigma^2_{s|s-1}\), the variance forecast available before observing \(r_s\). With adaptive drift and adaptive volatility, the Phase 5 funnel after reference time \(\tau\) is
+\[
+C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
+\qquad
+V_\tau(t)=\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1}.
+\]
+The standardized deviation is therefore
+\[
+Z_t=\frac{X_t-C_\tau(t)}{\sqrt{V_\tau(t)}}.
+\]
+This form is important: since \(C_\tau(t)\) already contains the anchor \(X_\tau\), subtracting both \(X_\tau\) and \(C_\tau(t)\) would double-count the reference price.
+
+Adaptive volatility makes the funnel breathe. After large shocks, \(V_\tau(t)\) grows faster and the upper and lower boundaries widen; during quieter periods, the funnel narrows. This usually reduces false boundary crossings in turbulent regimes and makes the visual funnel closer to how market uncertainty changes over time.
 
 \section{Discussion and Limitations}
 
@@ -397,7 +435,7 @@ The strategy enforces a no-realized-loss condition on completed voluntary exits.
     \item \textbf{Parameter estimation error:} the drift \(\mu\) is difficult to estimate accurately.
 \end{itemize}
 
-Future phases should extend the same adaptive structure to volatility, for example by replacing the fixed \(\sigma^2\) term with a GARCH-style estimate.
+Future phases should test the adaptive funnel on real data using walk-forward, out-of-sample evaluation rather than parameters selected on the full sample.
 
 \section{Conclusion}
 
