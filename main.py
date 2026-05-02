@@ -43,7 +43,7 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSlider, QLabel, QPushButton, QGridLayout, QGroupBox, QSizePolicy,
-    QMessageBox,
+    QMessageBox, QInputDialog,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -69,6 +69,17 @@ TEAL     = "#9FE1CB"
 F_UPPER  = "#F2B84B"
 F_LOWER  = "#6CC6FF"
 DEFAULT_REAL_SYMBOL = "SPY"
+REAL_DATA_CHOICES = [
+    ("SPY", "S&P 500 ETF"),
+    ("NVDA", "Nvidia"),
+    ("TSLA", "Tesla"),
+    ("MSFT", "Microsoft"),
+    ("AAPL", "Apple"),
+    ("AMZN", "Amazon"),
+    ("GOOGL", "Alphabet"),
+    ("META", "Meta"),
+    ("Custom ticker...", "Type another Yahoo symbol"),
+]
 
 
 # ── Phase 1 utilities ─────────────────────────────────────────────────────────
@@ -1058,7 +1069,7 @@ def run_online_adaptive_strategy(
         var_step=var_step, sigma_hat=sigma_hat,
         k_path=k_path, delta_path=delta_path,
         N=n_steps, k=current_k, h=h, c_buy=c_buy, c_sell=c_sell,
-        mode="Real SPY online adaptive",
+        mode="Real data online adaptive",
         source=source,
         parameter_log=parameter_log,
         selected_params={"k": current_k, "delta": current_delta},
@@ -1092,6 +1103,7 @@ def run_real_price_walk_forward(
         source=f"Yahoo daily adjusted {symbol.upper()}",
     )
     data["symbol"] = symbol.upper()
+    data["mode"] = f"Real {symbol.upper()} online adaptive"
     return data
 
 
@@ -1355,7 +1367,7 @@ class MainWindow(QMainWindow):
         btn_grid.setSpacing(5)
         self.btn_gen   = self._btn("Simulate",      self._generate)
         self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
-        self.btn_real  = self._btn("Real SPY",      self._real_data)
+        self.btn_real  = self._btn("Real Data",     self._real_data)
         self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
         self.btn_reset = self._btn("↺  Reset",      self._reset,       enabled=False)
         self.btn_autoscale = self._btn("Auto-scale ON", self._toggle_autoscale)
@@ -1525,10 +1537,13 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         self.playing = False
         self.btn_play.setText("▶  Play")
+        symbol = self._choose_real_symbol()
+        if symbol is None:
+            return
         p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
         try:
             data = run_real_price_walk_forward(
-                symbol=DEFAULT_REAL_SYMBOL,
+                symbol=symbol,
                 c_buy=p["cost"],
                 c_sell=p["cost"],
                 drift_process_var=p["drift_q"] * 1e-8,
@@ -1542,6 +1557,41 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
+
+    def _choose_real_symbol(self):
+        items = [f"{symbol} - {name}" for symbol, name in REAL_DATA_CHOICES]
+        default_idx = next(
+            (idx for idx, (symbol, _) in enumerate(REAL_DATA_CHOICES)
+             if symbol == DEFAULT_REAL_SYMBOL),
+            0,
+        )
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Choose real market data",
+            "Select a ticker to fetch from Yahoo Finance:",
+            items,
+            default_idx,
+            False,
+        )
+        if not ok:
+            return None
+
+        symbol = choice.split(" - ", 1)[0].strip().upper()
+        if symbol != "CUSTOM TICKER...":
+            return symbol
+
+        custom, ok = QInputDialog.getText(
+            self,
+            "Custom ticker",
+            "Enter a Yahoo Finance ticker, e.g. AMD, JPM, BTC-USD:",
+        )
+        if not ok:
+            return None
+        custom = custom.strip().upper()
+        if not custom:
+            QMessageBox.warning(self, "Missing ticker", "Please enter a ticker symbol.")
+            return None
+        return custom
 
     def _toggle_play(self):
         if self.playing:
