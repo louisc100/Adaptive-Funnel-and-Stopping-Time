@@ -80,6 +80,42 @@ REAL_DATA_CHOICES = [
     ("META", "Meta"),
     ("Custom ticker...", "Type another Yahoo symbol"),
 ]
+REAL_PERIOD_CHOICES = [
+    ("5 years", 5 * 365.25, "1d"),
+    ("2 years", 2 * 365.25, "1d"),
+    ("1 year", 365.25, "1d"),
+    ("1 month", 31, "1h"),
+    ("1 week", 7, "15m"),
+]
+
+
+def real_period_label(days, interval=None):
+    """Return the UI label for a configured real-data lookback."""
+    if days is None:
+        choice_label, _, choice_interval = REAL_PERIOD_CHOICES[0]
+        label = choice_label
+        interval = interval or choice_interval
+    else:
+        label = f"{float(days):.0f} days"
+        for choice_label, choice_days, choice_interval in REAL_PERIOD_CHOICES:
+            if abs(float(days) - float(choice_days)) < 1e-9:
+                label = choice_label
+                if interval is None:
+                    interval = choice_interval
+                break
+    return f"{label}, {interval} bars" if interval else label
+
+
+def periods_per_year_for_interval(interval):
+    """Approximate U.S. equity bar count per year for annualized metrics."""
+    return {
+        "1d": 252,
+        "1wk": 52,
+        "1h": 252 * 6.5,
+        "30m": 252 * 13,
+        "15m": 252 * 26,
+        "5m": 252 * 78,
+    }.get(interval, 252)
 
 
 # ── Phase 1 utilities ─────────────────────────────────────────────────────────
@@ -559,19 +595,21 @@ def parse_daily_price_rows(rows, price_columns=("Adj Close", "Close", "Price")):
     return np.log(prices)
 
 
-def fetch_yahoo_daily_log_prices(symbol=DEFAULT_REAL_SYMBOL, years=5):
+def fetch_yahoo_log_prices(symbol=DEFAULT_REAL_SYMBOL, years=5, days=None, interval="1d"):
     """
-    Fetch daily adjusted closes from Yahoo Finance's public chart endpoint.
+    Fetch adjusted/close price bars from Yahoo Finance's public chart endpoint.
 
     Example symbol: SPY. This endpoint needs no API key.
     """
     period2 = int(time.time())
-    period1 = period2 - int(years * 365.25 * 24 * 60 * 60)
+    lookback_days = float(days) if days is not None else float(years) * 365.25
+    period1 = period2 - int(lookback_days * 24 * 60 * 60)
     query_symbol = urllib.parse.quote(symbol.upper())
+    query_interval = urllib.parse.quote(interval)
     url = (
         f"https://query1.finance.yahoo.com/v8/finance/chart/{query_symbol}"
         f"?period1={period1}&period2={period2}"
-        "&interval=1d&events=history&includeAdjustedClose=true"
+        f"&interval={query_interval}&events=history&includeAdjustedClose=true"
     )
     request = urllib.request.Request(
         url,
@@ -600,6 +638,11 @@ def fetch_yahoo_daily_log_prices(symbol=DEFAULT_REAL_SYMBOL, years=5):
     if prices.size < 2 or np.any(prices <= 0):
         raise ValueError(f"Yahoo returned insufficient positive prices for {symbol}.")
     return np.log(prices)
+
+
+def fetch_yahoo_daily_log_prices(symbol=DEFAULT_REAL_SYMBOL, years=5, days=None):
+    """Backward-compatible daily Yahoo fetch wrapper."""
+    return fetch_yahoo_log_prices(symbol=symbol, years=years, days=days, interval="1d")
 
 
 def select_walk_forward_params(
@@ -1107,14 +1150,20 @@ def run_online_adaptive_strategy(
 
 def run_real_price_walk_forward(
     symbol=DEFAULT_REAL_SYMBOL,
+    lookback_days=None,
+    interval="1d",
     c_buy=0.0,
     c_sell=0.0,
     drift_process_var=1e-7,
     garch_alpha=0.06,
     garch_beta=0.90,
 ):
-    """Fetch daily market data and run one continuous online adaptive test."""
-    full_lp = fetch_yahoo_daily_log_prices(symbol=symbol)
+    """Fetch real market bars and run one continuous online adaptive test."""
+    full_lp = fetch_yahoo_log_prices(
+        symbol=symbol,
+        days=lookback_days,
+        interval=interval,
+    )
     data = run_online_adaptive_strategy(
         full_lp,
         c_buy=c_buy,
@@ -1122,9 +1171,12 @@ def run_real_price_walk_forward(
         drift_process_var=drift_process_var,
         garch_alpha=garch_alpha,
         garch_beta=garch_beta,
-        source=f"Yahoo daily adjusted {symbol.upper()}",
+        source=f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}",
     )
     data["symbol"] = symbol.upper()
+    data["lookback_days"] = lookback_days
+    data["interval"] = interval
+    data["periods_per_year"] = periods_per_year_for_interval(interval)
     data["mode"] = f"Real {symbol.upper()} online adaptive"
     return data
 
@@ -1562,10 +1614,16 @@ class MainWindow(QMainWindow):
         symbol = self._choose_real_symbol()
         if symbol is None:
             return
+        period = self._choose_real_period()
+        if period is None:
+            return
+        lookback_days, interval = period
         p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
         try:
             data = run_real_price_walk_forward(
                 symbol=symbol,
+                lookback_days=lookback_days,
+                interval=interval,
                 c_buy=p["cost"],
                 c_sell=p["cost"],
                 drift_process_var=p["drift_q"] * 1e-8,
@@ -1615,6 +1673,25 @@ class MainWindow(QMainWindow):
             return None
         return custom
 
+    def _choose_real_period(self):
+        items = [f"{label} - {interval} bars" for label, _, interval in REAL_PERIOD_CHOICES]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Choose history length",
+            "How much history should be fetched, and at what bar interval?",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        selected_label = choice.split(" - ", 1)[0]
+        for label, days, interval in REAL_PERIOD_CHOICES:
+            if label == selected_label:
+                return days, interval
+        _, days, interval = REAL_PERIOD_CHOICES[0]
+        return days, interval
+
     def _toggle_play(self):
         if self.playing:
             self.timer.stop()
@@ -1657,8 +1734,15 @@ class MainWindow(QMainWindow):
             zs  = f"{zn:+.2f}" if not np.isnan(zn) else "n/a"
             pos = "Holding" if d["holding"][t] else "Cash"
             wf_summary = d.get("walk_forward_summary")
-            sharpe = annualized_sharpe(d["portfolio_w"][:t + 1])
-            calmar = calmar_ratio(d["portfolio_w"][:t + 1])
+            periods_per_year = d.get("periods_per_year", 252)
+            sharpe = annualized_sharpe(
+                d["portfolio_w"][:t + 1],
+                periods_per_year=periods_per_year,
+            )
+            calmar = calmar_ratio(
+                d["portfolio_w"][:t + 1],
+                periods_per_year=periods_per_year,
+            )
 
             self.stat_labels["mode"].setText(d.get("mode", "Simulation"))
             self.stat_labels["source"].setText(d.get("source", "Generated path"))

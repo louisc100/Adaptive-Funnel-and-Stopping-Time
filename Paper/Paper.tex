@@ -515,14 +515,16 @@ and the Calmar ratio is
 \frac{R_{\mathrm{ann}}}{|D_{\min}|}.
 \]
 
-This protocol does not prove profitability. Its purpose is more modest and more important: it prevents accidental lookahead bias, separates parameter fitting from evaluation, and gives a fairer comparison against buy-and-hold. In the implementation, a local regime-changing path is used as an offline walk-forward demonstration. The same logic is also applied to real daily market prices fetched from a public chart API or loaded from an adjusted-close CSV file. The data source, symbol, sampling frequency, and whether prices are adjusted for dividends and splits should be reported with every real-data result.
+This protocol does not prove profitability. Its purpose is more modest and more important: it prevents accidental lookahead bias, separates parameter fitting from evaluation, and gives a fairer comparison against buy-and-hold. In the implementation, a local regime-changing path is used as an offline walk-forward demonstration. The same logic is also applied to real market bar prices fetched from a public chart API or loaded from an adjusted-close CSV file. The data source, symbol, lookback window, bar interval, and whether prices are adjusted for dividends and splits should be reported with every real-data result.
 
-For the real daily-price visualization, the implementation uses a continuous online variant rather than restarting the strategy at every fold. The strategy begins with initial parameters \(\theta_0=(k_0,\delta_0)\). At the start of each new trading week, the most recent week of daily prices is used to compute a suggested parameter vector \(\tilde\theta_j\). The live parameter is then updated by smoothing:
+For the real-data visualization, the implementation uses a continuous online variant rather than restarting the strategy at every fold. The selected lookback determines the sampling interval: longer horizons may use daily bars, while shorter horizons may use intraday bars such as hourly or 15-minute prices. This keeps short-horizon animations from degenerating into only a few daily observations, although the resulting statistics should be interpreted at the chosen bar frequency.
+
+The strategy begins with initial parameters \(\theta_0=(k_0,\delta_0)\). At the start of each new update window, the most recent block of past bars is used to compute a suggested parameter vector \(\tilde\theta_j\). The live parameter is then updated by smoothing:
 \[
 \theta_j=(1-\rho)\theta_{j-1}+\rho\tilde\theta_j,
 \qquad 0<\rho\leq 1.
 \]
-For integer-valued parameters such as \(\delta\), the smoothed value is rounded and constrained to the candidate grid. The next week is traded using \(\theta_j\), while the position state, realized wealth, and mark-to-market wealth continue without reset. This gives a more realistic animation: one continuous trading account learns from recent data while avoiding lookahead.
+For integer-valued parameters such as \(\delta\), the smoothed value is rounded and constrained to the candidate grid. The next block of bars is traded using \(\theta_j\), while the position state, realized wealth, and mark-to-market wealth continue without reset. This gives a more realistic animation: one continuous trading account learns from recent data while avoiding lookahead.
 
 \section{Discussion and Limitations}
 
