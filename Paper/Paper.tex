@@ -3,7 +3,7 @@
 \usepackage{amsmath, amssymb, amsthm}
 \usepackage{hyperref}
 
-\title{An Adaptive Funnel-Based Stopping Strategy with No-Realized-Loss Exits}
+\title{An Adaptive Funnel-Based Trading Rule with Transaction-Cost-Safe Exits}
 \author{Louis Charistias Saragih}
 \date{May 2026}
 
@@ -15,496 +15,240 @@
 \maketitle
 
 \begin{abstract}
-We propose a threshold-based stopping strategy for trading under drift and volatility. The method compares a log-price path against a drift-adjusted predictive funnel and exits a position only when three conditions are simultaneously satisfied: the price crosses the upper funnel boundary, local momentum weakens, and the log-return exceeds a transaction-cost-adjusted profit threshold. This gives a rigorous no-realized-loss property for completed algorithmic exits. The guarantee does not imply that the strategy is risk-free: mark-to-market wealth may decline while holding, capital may be locked for long periods, and forced exits may realize losses. The framework is formulated using discrete-time stochastic processes, stopping times, and elementary statistical estimation.
+This paper formulates a discrete-time, long-only trading rule based on a drift-adjusted predictive funnel for log prices. The strategy enters and exits positions using standardized price deviations, local momentum, adaptive drift and volatility estimates, and an explicit transaction-cost profit threshold. The main formal property is a no-realized-loss guarantee for completed voluntary exits: whenever the algorithm sells under its own exit rule, the sale price is high enough to cover proportional buy and sell costs. This guarantee is deliberately narrow. It does not remove mark-to-market drawdown, opportunity cost, indefinite holding risk, model error, or finite-horizon liquidation risk. The implementation also includes practical modifications used in the simulation: bounded diagnostic funnels, trailing-profit exits, trend-continuation re-entry, walk-forward parameter selection, online parameter smoothing, and real market bar data with horizon-dependent sampling intervals.
 \end{abstract}
 
-\section{Introduction}
+\section{Motivation}
 
-A common trading intuition is to hold a stock while it is below or near the purchase price, and to sell only after a sufficiently favorable move once short-term upward momentum has weakened. The purpose of this paper is to formalize this idea as a rule-based stopping strategy rather than to claim global optimality.
+The project studies a rule-based version of a common trading idea: hold an asset until price has moved favorably, avoid selling at a realized loss, and re-enter only when the market appears statistically attractive or trend participation is justified. The objective is not to prove global optimality or profitability. The objective is to define a mathematically consistent algorithm, identify exactly what is guaranteed, and evaluate the remaining risks using simulation and real market data.
 
-The strategy combines three components:
+The strategy is built from four ingredients:
 \begin{enumerate}
-    \item a drift-adjusted deviation statistic measuring how far the log-price has moved relative to its expected path;
-    \item a local momentum statistic detecting whether recent upward movement has stalled;
-    \item an explicit profit threshold ensuring that completed algorithmic exits do not realize a loss after transaction costs.
+    \item a predictive funnel for log prices;
+    \item a momentum filter for timing entries and exits;
+    \item a transaction-cost-adjusted profit threshold for voluntary sells;
+    \item adaptive estimation and walk-forward testing to reduce lookahead bias.
 \end{enumerate}
 
-The central point is that the strategy can impose a \emph{no voluntary realized loss} constraint, but it cannot eliminate economic risk. While a position remains open, the mark-to-market value of the position can fall. Thus the strategy transforms realized-loss risk into holding-time risk, opportunity cost, and mark-to-market drawdown.
+The central distinction is between realized wealth and mark-to-market wealth. The strategy can enforce a no-realized-loss condition on completed voluntary exits, but it cannot prevent the open position from losing value before an exit occurs.
 
-\section{Price Model}
+\section{Market Model and Predictive Funnel}
 
-Let \((S_t)_{t\geq 0}\) denote the asset price at discrete times. Define the log-price
+Let \(S_t>0\) be the asset price observed at discrete times \(t=0,1,\ldots,T\), and let
 \[
-X_t=\log S_t.
+X_t=\log S_t
 \]
-
-For the baseline model, assume
+be the log price. The baseline simulation model is
 \[
 X_{t+1}=X_t+\mu+\sigma\varepsilon_{t+1},
 \qquad
-\varepsilon_{t+1}\sim \mathcal N(0,1),
+\varepsilon_{t+1}\sim\mathcal N(0,1),
 \]
-where \(\mu\in\mathbb R\) is the drift and \(\sigma>0\) is the volatility. Let
-\[
-\mathcal F_t=\sigma(X_0,\ldots,X_t)
-\]
-be the information available at time \(t\).
+where \(\mu\in\mathbb R\) and \(\sigma>0\). In the implemented strategy, the trader does not need to know the true \(\mu\) and \(\sigma\). Instead, the funnel uses one-step-ahead estimates \(\hat\mu_{s|s-1}\) and \(\hat\sigma^2_{s|s-1}\).
 
-\section{Deviation Signal and Predictive Funnel}
+After a reference time \(\tau\), define
+\[
+C_\tau(t)
+=
+X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
+\qquad
+V_\tau(t)
+=
+\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1},
+\qquad t>\tau.
+\]
+The standardized funnel deviation is
+\[
+Z_{\tau,t}
+=
+\frac{X_t-C_\tau(t)}{\sqrt{V_\tau(t)}}.
+\]
+For \(k>0\), the upper and lower log-funnel boundaries are
+\[
+U_\tau(t)=C_\tau(t)+k\sqrt{V_\tau(t)},
+\qquad
+L_\tau(t)=C_\tau(t)-k\sqrt{V_\tau(t)}.
+\]
+Thus \(Z_{\tau,t}>k\) is equivalent to \(X_t>U_\tau(t)\), and \(Z_{\tau,t}<-k\) is equivalent to \(X_t<L_\tau(t)\).
 
-Fix a buying time \(\tau_b\). More generally, let \(\mu_s\) and \(\sigma_s\) denote the drift and volatility estimates used for step \(s\). Define the predictive center and cumulative variance by
-\[
-C(t)=X_{\tau_b}+\sum_{s=\tau_b+1}^{t}\mu_s,
-\qquad
-V(t)=\sum_{s=\tau_b+1}^{t}\sigma_s^2.
-\]
-In the fixed-parameter baseline model, \(\mu_s\equiv\mu\) and \(\sigma_s\equiv\sigma\), so these reduce to
-\[
-C(t)=X_{\tau_b}+\mu(t-\tau_b),
-\qquad
-V(t)=\sigma^2(t-\tau_b).
-\]
-For a threshold parameter \(k>0\), define the upper and lower funnel boundaries by
-\[
-U(t)=C(t)+k\sqrt{V(t)},
-\qquad
-L(t)=C(t)-k\sqrt{V(t)}.
-\]
-Equivalently, define the normalized deviation statistic
-\[
-Z_t=
-\frac{X_t-C(t)}{\sqrt{V(t)}},
-\qquad t>\tau_b.
-\]
-Then \(X_t>U(t)\) is equivalent to \(Z_t>k\).
-
-\begin{remark}[Fixed-time versus sequential interpretation]
-For a fixed time \(t\), under the fixed-parameter Gaussian baseline with correctly specified \(\mu\) and \(\sigma\), \(Z_t\sim\mathcal N(0,1)\). However, the trading rule monitors \(Z_t\) repeatedly over time. Therefore the relevant object is not only the fixed-time tail probability \(P(Z_t>k)\), but the boundary-crossing probability
-\[
-P\left(\sup_{\tau_b<t\leq T}Z_t>k\right).
-\]
-Thus \(k\) should be interpreted as a funnel-width or boundary-crossing tuning parameter, not simply as a fixed-time significance level.
+\begin{remark}
+At a fixed time under the correctly specified Gaussian baseline, \(Z_{\tau,t}\) has a standard normal interpretation. The trading rule, however, monitors the statistic sequentially. Hence \(k\) is best viewed as a boundary-width tuning parameter, not as a simple fixed-time significance level.
 \end{remark}
 
-\section{Momentum Signal}
+\section{Momentum and Transaction Costs}
 
-For a window length \(\delta\geq 1\), define the finite-difference momentum signal
+For an integer window \(\delta\geq 1\), define the finite-difference momentum statistic
 \[
 M_t=X_t-X_{t-\delta}.
 \]
-When \(M_t>0\), the recent log-price movement is upward over the last \(\delta\) steps. When \(M_t\leq 0\), recent upward momentum has stalled or reversed. Under the baseline Gaussian model,
-\[
-M_t\sim\mathcal N(\mu\delta,\sigma^2\delta).
-\]
-Hence \(M_t\) is a noisy local trend signal.
+Positive \(M_t\) indicates recent upward movement, while \(M_t\leq 0\) indicates that recent upward momentum has stalled or reversed.
 
-\section{Transaction Costs and Profit Threshold}
-
-Suppose that buying incurs proportional cost \(c_{\mathrm{buy}}\geq 0\) and selling incurs proportional cost \(c_{\mathrm{sell}}\in[0,1)\). Buying one unit at price \(S_{\tau_b}\) effectively costs
+Suppose buying incurs proportional cost \(c_{\mathrm{buy}}\geq 0\) and selling incurs proportional cost \(c_{\mathrm{sell}}\in[0,1)\). A trade entered at \(\tau_b\) and exited at \(t\) has positive after-cost realized multiplier exactly when
 \[
-(1+c_{\mathrm{buy}})S_{\tau_b},
-\]
-and selling at price \(S_t\) yields
-\[
-(1-c_{\mathrm{sell}})S_t.
-\]
-To avoid a realized loss after transaction costs, it is necessary and sufficient that
-\[
-(1-c_{\mathrm{sell}})S_t>(1+c_{\mathrm{buy}})S_{\tau_b}.
-\]
-Taking logarithms gives the profit condition
-\[
-X_t-X_{\tau_b}>h,
-\]
-where
-\[
-h=
-\log\left(\frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}\right).
-\]
-When transaction costs are ignored, \(h=0\).
-
-\section{Stopping Rule}
-
-\begin{definition}[Adaptive funnel stopping rule]
-Given a buying time \(\tau_b\), define the selling time by
-\[
-\tau_s=
-\inf\left\{
- t>\tau_b:
- X_t>U(t),\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
-\right\}.
+\frac{(1-c_{\mathrm{sell}})S_t}
+{(1+c_{\mathrm{buy}})S_{\tau_b}}>1.
 \]
 Equivalently,
 \[
-\tau_s=
+X_t-X_{\tau_b}>h,
+\qquad
+h=
+\log\left(\frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}\right).
+\]
+The quantity \(h\) is the minimum log return required to break even after costs.
+
+\section{Trading Rule}
+
+The strategy is long-only. In the visualization, the simulation starts with an initial position at the first tradable observation so that the exit logic can be seen immediately. After a sale, the rule alternates between cash and long exposure.
+
+\subsection{Voluntary Exit}
+
+Let \(\tau_b\) be the current entry time. The mathematical upper-funnel exit rule is
+\[
+\tau_s
+=
 \inf\left\{
- t>\tau_b:
- Z_t>k,\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
+t>\tau_b+\delta:
+Z_{\tau_b,t}>k,\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
 \right\}.
 \]
-\end{definition}
+The first condition says price is high relative to the predictive funnel; the second says recent upward momentum has weakened; the third ensures the trade is profitable after transaction costs.
 
-The rule says: sell only after the price crosses the upper funnel boundary, local momentum has weakened, and the trade is profitable after costs.
+\subsection{Bounded Diagnostic Funnel}
 
-\section{Practical Bounded-Funnel and Trailing Exit}
-
-The since-entry funnel above is mathematically clean, but in long upward trends its cumulative variance \(V(t)\) can grow so large that the upper boundary becomes difficult to cross. In implementation, we therefore use a bounded reference window for the diagnostic funnel. Given a maximum lookback \(L\), define
+In long trends, the cumulative variance \(V_{\tau_b}(t)\) can grow so large that the funnel becomes too wide to trigger practical decisions. The implementation therefore uses a bounded diagnostic reference for signal generation. Given a maximum lookback \(L\), define
 \[
 \rho_t=\max\{\tau_b,t-L\}.
 \]
-The displayed and tested funnel may then use
+The diagnostic statistic used for the funnel test is
 \[
-C_{\rho_t}(t)=X_{\rho_t}+\sum_{s=\rho_t+1}^{t}\mu_s,
-\qquad
-V_{\rho_t}(t)=\sum_{s=\rho_t+1}^{t}\sigma_s^2,
+Z^{(L)}_t
+=
+\frac{X_t-C_{\rho_t}(t)}
+{\sqrt{V_{\rho_t}(t)}}.
 \]
-and
-\[
-Z_t^{(L)}=\frac{X_t-C_{\rho_t}(t)}{\sqrt{V_{\rho_t}(t)}}.
-\]
-This keeps the diagnostic funnel from widening indefinitely while preserving the original entry price \(\tau_b\) for profit accounting.
+The original entry price \(X_{\tau_b}\) is still used for profit accounting. In the current implementation, the default is \(L=60\) bars.
 
-We also add a trailing-profit exit. Let
+\subsection{Trailing-Profit Exit}
+
+The implementation also allows a trailing-profit exit. Let
 \[
 H_t=\max_{\tau_b\leq u\leq t}X_u
 \]
-be the highest log-price observed since entry, and let \(a>0\) be a trailing drawdown threshold. A voluntary trailing exit is allowed when
+be the highest log price since entry. For a trailing threshold \(a>0\), a trailing exit is allowed when
 \[
 H_t-X_t\geq a
 \qquad\text{and}\qquad
 X_t-X_{\tau_b}>h.
 \]
-Thus the complete practical sell rule exits when either the bounded-funnel sell condition holds or the trailing-profit condition holds. In both cases, the transaction-cost profit condition \(X_t-X_{\tau_b}>h\) is retained, so the no-realized-loss property for completed voluntary exits is unchanged.
+The default implementation uses \(a=0.04\) in log-price units. Since the profit condition is retained, this practical exit does not weaken the no-realized-loss theorem.
 
-\section{Trading Cycle and Re-Entry Rule}
+\subsection{Re-Entry}
 
-The stopping rule above describes when an existing long position is exited. To turn the rule into a repeated trading strategy, we also specify how the strategy re-enters after a completed sale.
-
-Suppose the strategy sells at time \(\tau_s\) and then holds cash. During the cash period, take \(\tau_s\) as the new reference time, define the corresponding predictive center \(C_{\tau_s}(t)\) and variance \(V_{\tau_s}(t)\), and set
+After a sale at \(\tau_s\), the strategy holds cash and uses \(\tau_s\) as the new reference point. The original symmetric re-entry rule buys after a lower-funnel recovery:
 \[
-Z_t^{\mathrm{down}}
-=
-\frac{X_t-C_{\tau_s}(t)}
-{\sqrt{V_{\tau_s}(t)}},
-\qquad t>\tau_s.
+Z_{\tau_s,t}<-k,
+\qquad
+M_t\geq 0.
 \]
-The original symmetric re-entry rule buys after a lower-funnel recovery:
+This is a bargain-entry rule. It works naturally in mean-reverting markets but can remain in cash during persistent upward trends. The implementation therefore adds a trend-continuation entry. For \(z_{\mathrm{trend}}\geq 0\), buy when either
 \[
 \tau_b^{\mathrm{next}}
 =
 \inf\left\{
-t>\tau_s:
-Z_t^{\mathrm{down}}<-k,\quad M_t\geq 0
+t>\tau_s+\delta:
+\left(Z_{\tau_s,t}<-k,\ M_t\geq 0\right)
+\quad\text{or}\quad
+\left(Z_{\tau_s,t}>z_{\mathrm{trend}},\ M_t>0\right).
 \right\}.
 \]
-This is useful in mean-reverting or choppy markets, but it can leave the strategy in cash during persistent upward trends. To reduce this opportunity-cost problem, the implementation also allows a trend-continuation re-entry. Let \(z_{\mathrm{trend}}\geq 0\) be a smaller entry threshold. The practical re-entry rule is
-\[
-\tau_b^{\mathrm{next}}
-=
-\inf\left\{
-t>\tau_s:
-\left(Z_t^{\mathrm{down}}<-k,\ M_t\geq 0\right)
-\ \text{or}\
-\left(Z_t^{\mathrm{down}}>z_{\mathrm{trend}},\ M_t>0\right)
-\right\}.
-\]
-The first condition is the bargain re-entry rule: buy after an unusually low price has started to recover. The second condition is the trend-continuation rule: buy when the price is above the adaptive center and local momentum is positive. In the simulation, \(z_{\mathrm{trend}}\) is intentionally smaller than \(k\), because it is meant to detect participation in an ongoing trend rather than an extreme statistical event.
-
-Thus the full algorithm alternates between two regimes:
-\begin{enumerate}
-    \item while holding the asset, sell only when the upper-funnel, weakened-momentum, and profit-threshold conditions are all satisfied;
-    \item while in cash, buy either after a lower-funnel recovery or after a trend-continuation signal.
-\end{enumerate}
-
-The no-realized-loss theorem below applies to completed sell exits. The re-entry rule determines when capital is redeployed, but it does not by itself create a realized gain or loss.
+The default value is \(z_{\mathrm{trend}}=0.35\), intentionally smaller than \(k\). The first condition seeks a recovered discount; the second permits participation in an ongoing upward trend. At the current Layer 2 stage, \(z_{\mathrm{trend}}\) is treated as a fixed design constant; in later calibration work it should either be selected by walk-forward validation or made time-varying with the entry/exit thresholds.
 
 \section{No-Realized-Loss Property}
 
-\begin{theorem}[No realized loss on completed algorithmic exits]
-Suppose a trade is entered at time \(\tau_b\) and exited at a finite time \(\tau_s<\infty\) according to the stopping rule above. Then the net realized wealth multiplier satisfies
+\begin{theorem}[Transaction-cost-safe voluntary exit]
+Suppose a position is entered at \(\tau_b\) and voluntarily exited at a finite time \(\tau_s\) by either the funnel exit or the trailing-profit exit. If the exit rule includes the condition
+\[
+X_{\tau_s}-X_{\tau_b}>h,
+\]
+then the after-cost realized multiplier satisfies
 \[
 \frac{(1-c_{\mathrm{sell}})S_{\tau_s}}
 {(1+c_{\mathrm{buy}})S_{\tau_b}}>1.
 \]
-Thus every completed algorithmic exit has positive realized return after transaction costs.
 \end{theorem}
 
 \begin{proof}
-By the stopping rule,
+By definition of \(h\),
 \[
-X_{\tau_s}-X_{\tau_b}>h
-=
+X_{\tau_s}-X_{\tau_b}
+>
 \log\left(\frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}\right).
 \]
-Therefore
+Exponentiating gives
 \[
 \frac{S_{\tau_s}}{S_{\tau_b}}
-=
-\exp(X_{\tau_s}-X_{\tau_b})
 >
 \frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}.
 \]
-Multiplying both sides by \((1-c_{\mathrm{sell}})/(1+c_{\mathrm{buy}})\) gives
-\[
-\frac{(1-c_{\mathrm{sell}})S_{\tau_s}}
-{(1+c_{\mathrm{buy}})S_{\tau_b}}>1.
-\]
+Multiplying by \((1-c_{\mathrm{sell}})/(1+c_{\mathrm{buy}})\) proves the claim.
 \end{proof}
 
 \begin{remark}
-This theorem applies only to completed algorithmic exits satisfying the stopping rule. If a finite horizon \(T\) is imposed and the position is forcibly liquidated at \(T\), the theorem need not apply. Forced exits can realize losses.
+The theorem only applies to completed voluntary exits. It does not apply to forced liquidation at a finite horizon, margin liquidation, inability to execute, taxes, bid-ask slippage beyond the modeled cost, or a position that remains open indefinitely.
 \end{remark}
 
-\section{Wealth Processes}
+\section{Wealth and Performance Diagnostics}
 
-It is important to distinguish realized wealth from mark-to-market wealth. Let \(W_t^r\) denote realized wealth, updated only after completed exits. While holding a position purchased at \(\tau_b\), define mark-to-market wealth by
-\[
-W_t^m
-=
-W_{\tau_b}^r\frac{S_t}{S_{\tau_b}}
-\]
-in the frictionless case. With transaction costs interpreted as liquidation costs, one may instead use
+Let \(W_t^r\) denote realized wealth, updated only after completed exits. While holding a position entered at \(\tau_b\), the implementation reports after-cost mark-to-market wealth as
 \[
 W_t^m
 =
 W_{\tau_b}^r
-\frac{(1-c_{\mathrm{sell}})S_t}{(1+c_{\mathrm{buy}})S_{\tau_b}}.
+\frac{(1-c_{\mathrm{sell}})S_t}
+{(1+c_{\mathrm{buy}})S_{\tau_b}}.
 \]
-The no-realized-loss theorem concerns \(W_t^r\), not \(W_t^m\). While holding, \(W_t^m\) may decrease.
-
-A natural benchmark is buy-and-hold wealth,
+The buy-and-hold benchmark is computed from the same initial exposure convention:
 \[
-W_t^{\mathrm{bh}}=W_0\frac{S_t}{S_0},
+W_t^{\mathrm{bh}}
+=
+W_0
+\frac{(1-c_{\mathrm{sell}})S_t}
+{(1+c_{\mathrm{buy}})S_{\tau_0}}.
 \]
-which should be compared against both realized and mark-to-market strategy wealth.
-
-\section{Momentum Decision Consistency}
-
-The finite-difference signal \(M_t\) is a noisy local trend statistic. A simple consistency result can be obtained by working with returns. Suppose that over a local window,
-\[
-r_i=X_i-X_{i-1}=\beta+\epsilon_i,
-\]
-where \(\epsilon_i\) are independent with mean zero and finite variance. Define
-\[
-\hat\beta_n=\frac{1}{n}\sum_{i=1}^n r_i.
-\]
-
-\begin{theorem}[Consistency of local mean-return decision]
-Under the assumptions above,
-\[
-\hat\beta_n\xrightarrow{p}\beta.
-\]
-Consequently, for any threshold \(c\neq \beta\),
-\[
-\mathbf 1\{\hat\beta_n>c\}
-\xrightarrow{p}
-\mathbf 1\{\beta>c\}.
-\]
-\end{theorem}
-
-\begin{proof}
-The convergence \(\hat\beta_n\xrightarrow{p}\beta\) follows from the law of large numbers. Since \(c\neq\beta\), the indicator map is continuous at \(\beta\), and the conclusion follows from the continuous mapping theorem.
-\end{proof}
-
-This theorem justifies a smoothed momentum rule based on average recent returns. The simpler finite-difference signal \(M_t=X_t-X_{t-\delta}\) corresponds to the cumulative return over the last \(\delta\) steps and is noisier, but follows the same intuition.
-
-\section{Phase 2 Evaluation Metrics}
-
-The Phase 2 simulation evaluates the strategy by separating accounting quantities that can otherwise be confused. The baseline simulation tracks three wealth curves:
-\begin{enumerate}
-    \item realized wealth \(W_t^r\), which updates only after completed exits;
-    \item mark-to-market wealth \(W_t^m\), which shows hidden drawdowns while holding;
-    \item buy-and-hold wealth \(W_t^{\mathrm{bh}}\), which measures opportunity cost.
-\end{enumerate}
-
-From these curves, the main diagnostic quantities are:
-\[
-R_T^r=\frac{W_T^r}{W_0}-1,\qquad
-R_T^m=\frac{W_T^m}{W_0}-1,\qquad
-R_T^{\mathrm{bh}}=\frac{W_T^{\mathrm{bh}}}{W_0}-1.
-\]
-The benchmark gap is measured by
-\[
-G_T=\frac{W_T^m}{W_T^{\mathrm{bh}}}-1,
-\]
-so \(G_T>0\) means the strategy's liquidating mark-to-market value exceeds buy-and-hold at the horizon, while \(G_T<0\) means the strategy underperforms buy-and-hold.
-
-To measure hidden risk, define the mark-to-market drawdown process
-\[
-D_t^m=\frac{W_t^m}{\max_{0\leq s\leq t}W_s^m}-1,
-\]
-and its maximum drawdown over the horizon
-\[
-D_{\min}^m=\min_{0\leq t\leq T}D_t^m.
-\]
-The same calculation can be applied to \(W_t^{\mathrm{bh}}\) to compare the strategy's drawdown against the passive benchmark.
-
-Finally, let \(H_t\in\{0,1\}\) denote whether the strategy is holding the asset. The exposure ratio
-\[
-E_T=\frac{1}{T+1}\sum_{t=0}^T H_t
-\]
-measures the fraction of time capital is exposed to the asset. Together, \(R_T^r\), \(R_T^m\), \(R_T^{\mathrm{bh}}\), \(G_T\), \(D_{\min}^m\), the number of completed trades, and \(E_T\) form the Phase 2 evaluation dashboard.
-
-The simulation should use a Gaussian log-return model when validating the theory. If clipped shocks are used for visualization, they should be labelled as a visualization choice rather than as the exact model assumed in the paper.
-
-\section{Phase 3 Funnel Visualization}
-
-Phase 3 makes the stopping rule visually explicit. Instead of plotting only the price path and the derived statistic \(Z_t\), the simulation also plots the predictive funnel directly on the price chart.
-
-After a reference time \(\tau\), which is either the current buying time while holding or the most recent selling time while in cash, define the log-funnel center and cumulative variance by
-\[
-C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\mu_s,
-\qquad
-V_\tau(t)=\sum_{s=\tau+1}^{t}\sigma_s^2.
-\]
-In the fixed-parameter simulation, where \(\mu_s\equiv\mu\) and \(\sigma_s\equiv\sigma\), this is equivalent to \(C_\tau(t)=X_\tau+\mu(t-\tau)\) and \(V_\tau(t)=\sigma^2(t-\tau)\).
-
-The log-funnel boundaries are
-\[
-U_\tau(t)=C_\tau(t)+k\sqrt{V_\tau(t)},
-\qquad
-L_\tau(t)=C_\tau(t)-k\sqrt{V_\tau(t)},
-\qquad t\geq \tau.
-\]
-The corresponding price-level curves are
-\[
-\exp(C_\tau(t)),\qquad \exp(U_\tau(t)),\qquad \exp(L_\tau(t)).
-\]
-These are the curves displayed in the price panel.
-
-While the strategy is holding the asset, the upper boundary \(\exp(U_{\tau_b}(t))\) is the relevant exit boundary. A sell can occur only after the price crosses this upper boundary, momentum has weakened, and the profit-threshold condition is satisfied. While the strategy is in cash, the lower boundary \(\exp(L_{\tau_s}(t))\) remains the bargain re-entry boundary. A buy can occur either after the price crosses below this lower boundary and local momentum recovers, or after the price moves above the adaptive center with positive momentum according to the trend-continuation rule.
-
-Whenever the strategy sells or buys, the reference time is reset. Thus the plotted funnel is not one fixed band drawn from \(t=0\); it is a sequence of local predictive funnels, each anchored at the current trade reference point. This visualization is useful because it separates three ideas that are otherwise easy to confuse:
-\begin{enumerate}
-    \item the expected log-price path, shown by the funnel center;
-    \item statistically unusual movement, shown by crossing the upper or lower boundary;
-    \item executable trading decisions, which also require momentum and, for sells, the profit threshold.
-\end{enumerate}
-
-\section{Phase 4 Adaptive Drift Estimation}
-
-Phase 4 removes the unrealistic assumption that the strategy knows the true drift \(\mu\). The simulated market may still be generated from a baseline drift in order to create controlled experiments, but the trading rule uses an estimated drift when drawing its funnel.
 
 Let
 \[
-r_t=X_t-X_{t-1}
-\]
-denote the one-step log-return. We model the drift used by the strategy as a slowly changing latent state:
-\[
-\mu_t=\mu_{t-1}+\eta_t,
-\qquad
-\eta_t\sim\mathcal N(0,q),
-\]
-and observe returns through
-\[
-r_t=\mu_t+\xi_t,
-\qquad
-\xi_t\sim\mathcal N(0,\sigma^2).
-\]
-Here \(q\geq 0\) is the drift-adaptation variance. A larger \(q\) makes the drift estimate react faster to recent returns, while \(q=0\) gives a constant-drift estimator whose gain shrinks over time.
-
-To avoid lookahead bias, the funnel for step \(s\) uses the one-step-ahead prediction \(\hat\mu_{s|s-1}\), not the posterior estimate after seeing \(r_s\). The Kalman recursion is
-\[
-\hat\mu_{s|s-1}=\hat\mu_{s-1|s-1},
-\qquad
-P_{s|s-1}=P_{s-1|s-1}+q,
-\]
-\[
-K_s=\frac{P_{s|s-1}}{P_{s|s-1}+\sigma^2},
-\]
-\[
-\hat\mu_{s|s}=
-\hat\mu_{s|s-1}+K_s\left(r_s-\hat\mu_{s|s-1}\right),
-\qquad
-P_{s|s}=(1-K_s)P_{s|s-1}.
-\]
-
-With adaptive drift and fixed volatility, the Phase 4 funnel after reference time \(\tau\) becomes
-\[
-C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
-\qquad
-V_\tau(t)=\sum_{s=\tau+1}^{t}\sigma^2.
-\]
-The simulation initializes the filter from a neutral prior rather than the true simulated drift. The same upper-funnel sell rule, lower-funnel re-entry rule, momentum filter, and transaction-cost profit threshold are then applied using this adaptive center.
-
-\section{Phase 5 Adaptive Volatility Estimation}
-
-Phase 5 removes the fixed-width volatility assumption from the funnel. Instead of using \(V_\tau(t)=\sigma^2(t-\tau)\), the strategy estimates a one-step-ahead conditional variance and accumulates those forecasts over the life of each local funnel.
-
-Let the innovation relative to the drift forecast be
-\[
-e_s=r_s-\hat\mu_{s|s-1}.
-\]
-A GARCH(1,1)-style conditional variance recursion is
-\[
-\hat\sigma^2_{s|s-1}=h_s,
-\]
-\[
-h_{s+1}
+N_{\mathrm{trades}}
 =
-\omega+\alpha e_s^2+\beta h_s,
-\qquad
-\alpha\geq 0,\quad \beta\geq 0,\quad \alpha+\beta<1.
+\#\{i:\tau_{s,i}\leq T\}
 \]
-The parameter \(\alpha\) controls how strongly the variance forecast reacts to the most recent shock, while \(\beta\) controls volatility persistence. In the simulation, \(\omega\) is chosen from an initial long-run variance level:
+be the number of completed trades by horizon \(T\). For completed trades, define the average holding time
 \[
-\omega=(1-\alpha-\beta)\bar\sigma^2.
-\]
-
-To avoid lookahead bias, the funnel for step \(s\) uses \(\hat\sigma^2_{s|s-1}\), the variance forecast available before observing \(r_s\). With adaptive drift and adaptive volatility, the Phase 5 funnel after reference time \(\tau\) is
-\[
-C_\tau(t)=X_\tau+\sum_{s=\tau+1}^{t}\hat\mu_{s|s-1},
-\qquad
-V_\tau(t)=\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1}.
-\]
-The standardized deviation is therefore
-\[
-Z_t=\frac{X_t-C_\tau(t)}{\sqrt{V_\tau(t)}}.
-\]
-This form is important: since \(C_\tau(t)\) already contains the anchor \(X_\tau\), subtracting both \(X_\tau\) and \(C_\tau(t)\) would double-count the reference price.
-
-Adaptive volatility makes the funnel breathe. After large shocks, \(V_\tau(t)\) grows faster and the upper and lower boundaries widen; during quieter periods, the funnel narrows. This usually reduces false boundary crossings in turbulent regimes and makes the visual funnel closer to how market uncertainty changes over time.
-
-\section{Phase 6 Walk-Forward Backtesting}
-
-Phase 6 changes the evaluation question from ``does the rule behave correctly on a controlled path?'' to ``does the adaptive rule survive out-of-sample testing?'' The essential requirement is that parameters are chosen using only past data and then evaluated on future data that was not used for selection.
-
-Let the observed price history be divided into ordered train/test folds. For fold \(j\), write
-\[
-\mathcal T_j=\{t_j,\ldots,t_j+L_{\mathrm{train}}\}
-\]
-for the training window and
-\[
-\mathcal O_j=\{t_j+L_{\mathrm{train}},\ldots,t_j+L_{\mathrm{train}}+L_{\mathrm{test}}\}
-\]
-for the following out-of-sample window. Candidate parameters such as \(k\), \(\delta\), Kalman process variance \(q\), and GARCH parameters may be compared on \(\mathcal T_j\), but once the best candidate is selected, it is frozen before running the strategy on \(\mathcal O_j\).
-
-For a candidate parameter vector \(\theta\), define a training objective such as
-\[
-J_j(\theta)
+\bar\tau_{\mathrm{hold}}
 =
-R_{j,\mathrm{train}}^m(\theta)
-+D_{j,\mathrm{train}}^m(\theta)
-+\lambda G_{j,\mathrm{train}}(\theta),
+\frac{1}{N_{\mathrm{trades}}}
+\sum_{i=1}^{N_{\mathrm{trades}}}
+(\tau_{s,i}-\tau_{b,i}),
 \]
-where \(R^m\) is mark-to-market return, \(D^m\leq 0\) is maximum drawdown, \(G\) is the benchmark gap, and \(\lambda\geq 0\) controls how strongly benchmark-relative performance is rewarded. The selected parameter is
-\[
-\hat\theta_j=\arg\max_{\theta\in\Theta}J_j(\theta).
-\]
-The out-of-sample fold result is then computed by running the strategy on \(\mathcal O_j\) using \(\hat\theta_j\), with the adaptive drift and volatility filters initialized only from information available at the beginning of that test fold.
+when \(N_{\mathrm{trades}}>0\).
 
-The out-of-sample fold multipliers can be compounded:
+The dashboard reports realized return, mark-to-market return, buy-and-hold return, benchmark gap,
 \[
-M_{\mathrm{OOS}}=\prod_j \frac{W_{j,\mathrm{end}}^m}{W_{j,\mathrm{start}}^m},
-\qquad
-R_{\mathrm{OOS}}=M_{\mathrm{OOS}}-1.
+G_T=\frac{W_T^m}{W_T^{\mathrm{bh}}}-1,
 \]
-Additional diagnostics should include maximum drawdown, exposure, completed trade count, benchmark gap, Sharpe ratio, and Calmar ratio. Using wealth values \(W_t\), the annualized Sharpe ratio with zero risk-free rate is
+maximum drawdown,
+\[
+D_{\min}=\min_{0\leq t\leq T}
+\left(
+\frac{W_t}{\max_{0\leq s\leq t}W_s}-1
+\right),
+\]
+exposure, \(N_{\mathrm{trades}}\), \(\bar\tau_{\mathrm{hold}}\), Sharpe ratio, and Calmar ratio. For bar frequency \(B\) periods per year, the annualized Sharpe ratio is
 \[
 \mathrm{Sharpe}
 =
-\sqrt{252}\,
-\frac{\bar r}{s_r},
+\sqrt{B}\frac{\bar r}{s_r},
 \qquad
 r_t=\frac{W_t-W_{t-1}}{W_{t-1}},
 \]
@@ -514,34 +258,160 @@ and the Calmar ratio is
 =
 \frac{R_{\mathrm{ann}}}{|D_{\min}|}.
 \]
+The implementation uses \(B=252\) for daily bars, \(B=252\cdot 6.5\) for hourly bars, and \(B=252\cdot 26\) for 15-minute bars. These annualization constants assume U.S. equity trading hours; they should be changed for assets or venues with different trading calendars.
 
-This protocol does not prove profitability. Its purpose is more modest and more important: it prevents accidental lookahead bias, separates parameter fitting from evaluation, and gives a fairer comparison against buy-and-hold. In the implementation, a local regime-changing path is used as an offline walk-forward demonstration. The same logic is also applied to real market bar prices fetched from a public chart API or loaded from an adjusted-close CSV file. The data source, symbol, lookback window, bar interval, and whether prices are adjusted for dividends and splits should be reported with every real-data result.
+\section{Adaptive Estimation}
 
-For the real-data visualization, the implementation uses a continuous online variant rather than restarting the strategy at every fold. The selected lookback determines the sampling interval: longer horizons may use daily bars, while shorter horizons may use intraday bars such as hourly or 15-minute prices. This keeps short-horizon animations from degenerating into only a few daily observations, although the resulting statistics should be interpreted at the chosen bar frequency.
+The trading rule uses estimates available before observing the next return, preventing lookahead in the displayed funnel.
 
-The strategy begins with initial parameters \(\theta_0=(k_0,\delta_0)\). At the start of each new update window, the most recent block of past bars is used to compute a suggested parameter vector \(\tilde\theta_j\). The live parameter is then updated by smoothing:
+\subsection{Drift}
+
+Let \(r_t=X_t-X_{t-1}\). The drift is modeled as a slowly moving latent state,
+\[
+\mu_t=\mu_{t-1}+\eta_t,
+\qquad
+\eta_t\sim\mathcal N(0,q),
+\]
+with observation equation
+\[
+r_t=\mu_t+\xi_t,
+\qquad
+\xi_t\sim\mathcal N(0,\sigma^2).
+\]
+The Kalman one-step prediction is
+\[
+\hat\mu_{s|s-1}=\hat\mu_{s-1|s-1},
+\qquad
+P_{s|s-1}=P_{s-1|s-1}+q,
+\]
+and the update after observing \(r_s\) is
+\[
+K_s=\frac{P_{s|s-1}}{P_{s|s-1}+\sigma^2},
+\]
+\[
+\hat\mu_{s|s}
+=
+\hat\mu_{s|s-1}
++K_s(r_s-\hat\mu_{s|s-1}),
+\qquad
+P_{s|s}=(1-K_s)P_{s|s-1}.
+\]
+The UI drift-adaptation control changes \(q\): larger values make the drift estimate react faster to recent returns.
+
+\subsection{Volatility}
+
+The conditional variance forecast uses a GARCH-style recursion. With innovation
+\[
+e_s=r_s-\hat\mu_{s|s-1},
+\]
+define
+\[
+\hat\sigma^2_{s|s-1}=h_s,
+\qquad
+h_{s+1}=\omega+\alpha e_s^2+\beta h_s,
+\]
+where \(\alpha,\beta\geq 0\) and \(\alpha+\beta<1\). The implementation chooses
+\[
+\omega=(1-\alpha-\beta)\bar\sigma^2
+\]
+from an initial variance estimate \(\bar\sigma^2\). The funnel variance accumulates the one-step forecasts,
+\[
+V_\tau(t)=\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1}.
+\]
+
+\section{Backtesting and Real-Data Implementation}
+
+The offline walk-forward procedure selects parameters using only past data. For fold \(j\), let \(\mathcal T_j\) be the training window and \(\mathcal O_j\) the following out-of-sample window. For candidate parameter vector \(\theta\), the training objective used in the implementation has the form
+\[
+J_j(\theta)
+=
+R_{j,\mathrm{train}}^m(\theta)
++D_{j,\mathrm{train}}^m(\theta)
++\lambda G_{j,\mathrm{train}}(\theta),
+\]
+where \(R^m\) is mark-to-market return, \(D^m\leq 0\) is maximum drawdown, and \(G\) is the benchmark gap. The selected parameter is
+\[
+\hat\theta_j=\arg\max_{\theta\in\Theta}J_j(\theta).
+\]
+It is then evaluated on \(\mathcal O_j\) without using future information. The current implementation uses \(\lambda=0.15\), so benchmark-relative performance influences selection but does not dominate absolute mark-to-market return or drawdown.
+
+For real market data, the app uses a continuous online variant. Instead of resetting wealth and position at every fold, it keeps one account alive. Every update window, recent bars generate a suggested parameter vector \(\tilde\theta_j\), and the live parameter is smoothed:
 \[
 \theta_j=(1-\rho)\theta_{j-1}+\rho\tilde\theta_j,
-\qquad 0<\rho\leq 1.
+\qquad
+0<\rho\leq 1.
 \]
-For integer-valued parameters such as \(\delta\), the smoothed value is rounded and constrained to the candidate grid. The next block of bars is traded using \(\theta_j\), while the position state, realized wealth, and mark-to-market wealth continue without reset. This gives a more realistic animation: one continuous trading account learns from recent data while avoiding lookahead.
+Integer parameters such as \(\delta\) are rounded and constrained to the candidate grid. The current implementation uses learning rate \(\rho=0.25\) and update window \(5\) bars. This gives a more realistic animation: the account learns from recent data while position state, realized wealth, and mark-to-market wealth continue without reset.
 
-\section{Discussion and Limitations}
+The implementation can fetch Yahoo Finance chart data for several symbols, including SPY, NVDA, TSLA, MSFT, AAPL, AMZN, GOOGL, META, and custom tickers. The selected horizon determines the bar interval:
+\[
+\begin{array}{c|c}
+\text{lookback} & \text{bar interval}\\
+\hline
+5\text{ years} & 1\text{ day}\\
+2\text{ years} & 1\text{ day}\\
+1\text{ year} & 1\text{ day}\\
+1\text{ month} & 1\text{ hour}\\
+1\text{ week} & 15\text{ minutes}
+\end{array}
+\]
+This avoids having only a few observations in short-horizon animations. Intraday results should be interpreted cautiously because microstructure noise, bid-ask spreads, execution latency, and Yahoo interval availability matter more at shorter bar lengths.
 
-The strategy enforces a no-realized-loss condition on completed voluntary exits. However, this does not imply that the strategy is risk-free. The main limitations are:
+\section{Empirical Illustration}
+
+As a basic Layer 2 validation, the current implementation was run on SPY using Yahoo adjusted price data, a 5-year lookback, 1-day bars, zero transaction costs, drift-adaptation variance \(q=10^{-7}\) (the default UI value), \(\lambda=0.15\), \(\rho=0.25\), \(L=60\), \(a=0.04\), and \(z_{\mathrm{trend}}=0.35\). The purpose of this table is not to claim profitability, but to show that the framework produces the diagnostics required to compare the strategy against buy-and-hold. Because the data window is fetched relative to the current date and the UI sliders remain editable, small differences can occur if the run date or parameters differ.
+
+\[
+\begin{array}{l|r}
+\text{Quantity} & \text{SPY result}\\
+\hline
+\text{Bars} & 1255\\
+\text{Start price} & 388.18\\
+\text{End price} & 720.65\\
+\text{Realized return} & 53.10\%\\
+\text{Mark-to-market return} & 65.93\%\\
+\text{Buy-and-hold return} & 85.65\%\\
+\text{Benchmark gap} & -10.62\%\\
+\text{Strategy max drawdown} & -24.64\%\\
+\text{Buy-and-hold max drawdown} & -24.50\%\\
+\text{Exposure} & 92.60\%\\
+N_{\mathrm{trades}} & 9\\
+\bar\tau_{\mathrm{hold}} & 117.11\text{ bars}\\
+\text{Sharpe ratio} & 0.69\\
+\text{Calmar ratio} & 0.43\\
+\text{Online parameter updates} & 250\\
+\text{Final }(k,\delta) & (0.80,2)
+\end{array}
+\]
+
+In this example, the strategy earned a positive mark-to-market return but underperformed buy-and-hold. This is a useful outcome rather than a failure of the framework: it demonstrates why benchmark gap, drawdown, exposure, trade count, Sharpe ratio, and Calmar ratio must be reported together. The no-realized-loss theorem concerns completed voluntary exits only; it does not imply benchmark outperformance.
+
+\section{Future Calibration Direction}
+
+Layer 3 can replace fixed entry and momentum thresholds with time-varying thresholds. One candidate is a holding-time-dependent momentum threshold of the form
+\[
+f(t;\tau_b)
+=
+-\frac{c}{\sqrt{t-\tau_b}},
+\qquad c>0,
+\]
+used in place of the fixed condition \(M_t\leq 0\) for exits. Early after entry, the threshold is more negative and therefore requires clearer momentum deterioration before selling; as holding time grows, the threshold moves toward zero. A similar idea could be used to calibrate \(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on time since the last sale. These extensions are deliberately left outside Layer 2 because they introduce new calibration degrees of freedom and should be tested by walk-forward validation.
+
+\section{Limitations}
+
+The strategy is not risk-free. The main limitations are:
 \begin{itemize}
-    \item \textbf{Mark-to-market drawdown:} the current value of the position may fall while holding;
-    \item \textbf{Indefinite holding:} if the stopping rule never triggers, the position may remain open indefinitely;
-    \item \textbf{Forced-exit risk:} finite-horizon liquidation can realize losses;
-    \item \textbf{Opportunity cost:} the strategy may underperform buy-and-hold;
-    \item \textbf{Model misspecification:} real prices have changing volatility, jumps, and fat tails;
-    \item \textbf{Parameter estimation error:} the drift \(\mu\) is difficult to estimate accurately.
+    \item \textbf{Mark-to-market risk:} open positions can lose value before an exit occurs.
+    \item \textbf{Holding-time risk:} the algorithm may hold a losing or stagnant position for a long time.
+    \item \textbf{Forced-exit risk:} liquidation outside the voluntary exit rule can realize losses.
+    \item \textbf{Opportunity cost:} the strategy may underperform buy-and-hold, especially in persistent trends or if re-entry is too conservative.
+    \item \textbf{Estimation error:} drift is difficult to estimate, and volatility models are misspecified in real markets.
+    \item \textbf{Data and execution risk:} public chart data may contain gaps or limits, and the model does not fully include spreads, taxes, market impact, or order execution.
+    \item \textbf{Parameter sensitivity:} \(k\), \(\delta\), \(q\), \(L\), \(a\), and \(z_{\mathrm{trend}}\) affect both returns and risk.
 \end{itemize}
-
-Future phases should replace the offline demonstration path with cleaned real adjusted-close data and report the full walk-forward fold table.
 
 \section{Conclusion}
 
-We formulated a funnel-based stopping strategy for trading under drift and volatility. The key correction is the explicit profit threshold \(h\), which gives a rigorous no-realized-loss theorem for completed algorithmic exits. The strategy remains risky in mark-to-market terms, and its practical value must be judged by simulation, buy-and-hold comparison, drawdown, and holding-time behavior.
+The Layer 1--2 strategy now consists of a formal long-only trading rule, an implementation-aligned no-realized-loss theorem for voluntary exits, adaptive drift and volatility estimation, practical bounded and trailing exit logic, two-mode re-entry, walk-forward evaluation, and real-data testing across multiple lookbacks and bar intervals. The guarantee is intentionally limited but useful: completed voluntary exits are transaction-cost-safe by construction. The remaining question is empirical quality, which must be judged through benchmark-relative return, mark-to-market drawdown, exposure, trade frequency, Sharpe ratio, Calmar ratio, and robustness across assets and sampling frequencies.
 
 \end{document}
