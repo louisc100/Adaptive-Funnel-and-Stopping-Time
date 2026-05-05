@@ -630,6 +630,7 @@ def make_report(
     stitched_results: list[dict[str, Any]],
     gui_results: list[dict[str, Any]],
     args: argparse.Namespace,
+    comparison_sections: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     generated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -776,6 +777,8 @@ within the same table.
     \item GUI-style best Sharpe ratio: {latex_escape(gui_best_sharpe["experiment"])} with {format_num(gui_best_sharpe["sharpe"])}.
 \end{{itemize}}
 
+{comparison_sections}
+
 \section*{{Caveats}}
 This report is exploratory. It changes one extra parameter at a time and does
 not prove that a parameter is universally useful. Larger grids and more assets
@@ -787,6 +790,74 @@ out-of-sample evidence.
 \end{{document}}
 """
     path.write_text(tex)
+
+
+def make_comparison_section(
+    title: str,
+    metadata: dict[str, Any],
+    stitched_results: list[dict[str, Any]],
+    gui_results: list[dict[str, Any]],
+    train_size: int,
+    test_size: int,
+    bar_count: int,
+) -> str:
+    rows, best, best_gap, best_sharpe = result_rows(stitched_results)
+    gui_rows, gui_best, gui_best_gap, gui_best_sharpe = result_rows(
+        gui_results,
+        include_realized=True,
+    )
+    return rf"""
+\section*{{Comparison Dataset: {latex_escape(title)}}}
+This section repeats the same experiment structure on {latex_escape(metadata["symbol"])}
+using {latex_escape(metadata["lookback"])} of {latex_escape(metadata["interval"])} bars.
+Because this sample is shorter than the SPY 5-year dataset, the stitched
+walk-forward folds use a shorter training window of {train_size} bars and a
+test window of {test_size} bars.
+
+\begin{{tabular}}{{ll}}
+\toprule
+Data source & {latex_escape(metadata["source"])} \\
+Symbol & {latex_escape(metadata["symbol"])} \\
+Lookback & {latex_escape(metadata["lookback"])} \\
+Bar interval & {latex_escape(metadata["interval"])} \\
+Bars & {bar_count} \\
+Train size & {train_size} bars \\
+Test size & {test_size} bars \\
+\bottomrule
+\end{{tabular}}
+
+\subsection*{{{latex_escape(title)}: Stitched Walk-Forward}}
+\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
+\begin{{tabular}}{{p{{0.85in}}p{{0.95in}}rrrrrrrrrp{{1.15in}}}}
+\toprule
+Experiment & Optimized & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Final selected \\
+\midrule
+{chr(10).join(rows)}
+\bottomrule
+\end{{tabular}}
+\normalsize
+
+\subsection*{{{latex_escape(title)}: GUI-Style Continuous Online}}
+\scriptsize
+\setlength{{\tabcolsep}}{{3pt}}
+\begin{{tabular}}{{p{{0.85in}}p{{0.95in}}rrrrrrrrrrp{{1.15in}}}}
+\toprule
+Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected / fixed \\
+\midrule
+{chr(10).join(gui_rows)}
+\bottomrule
+\end{{tabular}}
+\normalsize
+
+\paragraph{{{latex_escape(title)} takeaways.}}
+Stitched best MtM is {latex_escape(best["experiment"])} with
+{format_pct(best["mtm_return"])}; stitched best Sharpe is
+{latex_escape(best_sharpe["experiment"])} with {format_num(best_sharpe["sharpe"])}.
+GUI-style best MtM is {latex_escape(gui_best["experiment"])} with
+{format_pct(gui_best["mtm_return"])}; GUI-style best Sharpe is
+{latex_escape(gui_best_sharpe["experiment"])} with {format_num(gui_best_sharpe["sharpe"])}.
+"""
 
 
 def parse_grid(values: str, cast):
@@ -818,6 +889,11 @@ def parse_args() -> argparse.Namespace:
         "--fast",
         action="store_true",
         help="Use smaller grids for quick smoke tests.",
+    )
+    parser.add_argument(
+        "--include-nvda-1y",
+        action="store_true",
+        help="Append an NVIDIA 1-year/1-day comparison section to the report.",
     )
     return parser.parse_args()
 
@@ -900,7 +976,86 @@ def main() -> None:
             f"Sharpe={format_num(result['sharpe'])}"
         )
 
-    make_report(args.output, metadata, results, gui_results, args)
+    comparison_sections = ""
+    if args.include_nvda_1y:
+        print("Running NVIDIA 1-year/1-day comparison section...")
+        nvda_args = argparse.Namespace(**vars(args))
+        nvda_args.source = "yahoo"
+        nvda_args.symbol = "NVDA"
+        nvda_args.period = "1 year"
+        nvda_args.interval = "1d"
+        nvda_args.train_size = min(args.train_size, 126)
+        nvda_args.test_size = min(args.test_size, 21)
+        nvda_lp, nvda_metadata = load_dataset(backend, nvda_args)
+        nvda_args.lp = nvda_lp
+        nvda_periods_per_year = nvda_metadata["periods_per_year"]
+        nvda_stitched = []
+        nvda_gui = []
+
+        print(
+            f"NVDA bars: {len(nvda_lp) - 1}, "
+            f"train={nvda_args.train_size}, test={nvda_args.test_size}"
+        )
+        for experiment in experiments:
+            print(f"Running NVDA stitched {experiment}...")
+            if experiment == "rho":
+                result = run_rho_online_experiment(
+                    backend,
+                    nvda_lp,
+                    k_grid,
+                    delta_grid,
+                    nvda_args.train_size,
+                    nvda_args.test_size,
+                    c,
+                    c,
+                    nvda_periods_per_year,
+                )
+            else:
+                result = run_walk_forward_experiment(
+                    backend,
+                    nvda_lp,
+                    experiment,
+                    k_grid,
+                    delta_grid,
+                    nvda_args.train_size,
+                    nvda_args.test_size,
+                    c,
+                    c,
+                    nvda_periods_per_year,
+                )
+            nvda_stitched.append(result)
+            print(
+                f"  MtM={100 * result['mtm_return']:.2f}% "
+                f"Sharpe={format_num(result['sharpe'])}"
+            )
+
+        for experiment in experiments:
+            print(f"Running NVDA GUI-style {experiment}...")
+            result = run_gui_continuous_experiment(
+                backend,
+                nvda_lp,
+                experiment,
+                c,
+                c,
+                nvda_periods_per_year,
+            )
+            nvda_gui.append(result)
+            print(
+                f"  MtM={100 * result['mtm_return']:.2f}% "
+                f"Sharpe={format_num(result['sharpe'])}"
+            )
+
+        comparison_sections = make_comparison_section(
+            "NVDA 1-Year Daily",
+            nvda_metadata,
+            nvda_stitched,
+            nvda_gui,
+            nvda_args.train_size,
+            nvda_args.test_size,
+            len(nvda_lp) - 1,
+        )
+
+    make_report(args.output, metadata, results, gui_results, args, comparison_sections)
     print(f"Report written to {args.output}")
 
 
