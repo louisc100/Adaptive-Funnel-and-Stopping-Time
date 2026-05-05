@@ -578,6 +578,14 @@ def latex_escape(text: str) -> str:
 
 
 def selected_param_string(summary: dict[str, Any]) -> str:
+    final_live = summary.get("final_live")
+    if final_live:
+        items = [
+            f"end k={format_param_value(final_live.get('k'))}",
+            f"end d={format_param_value(final_live.get('delta'))}",
+        ]
+        return latex_escape(", ".join(items))
+
     items = [
         f"{name}={format_param_value(value)}"
         for name, value in summary["final_selected"].items()
