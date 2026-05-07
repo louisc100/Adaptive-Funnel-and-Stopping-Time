@@ -335,6 +335,15 @@ where \(R^m\) is mark-to-market return, \(D^m\leq 0\) is maximum drawdown, and \
 \]
 It is then evaluated on \(\mathcal O_j\) without using future information. The current implementation uses \(\lambda=0.15\), so benchmark-relative performance influences selection but does not dominate absolute mark-to-market return or drawdown.
 
+In the accompanying calibration reports, the parameter search has been explored
+up to four dimensions: the baseline two-dimensional search over \((k,\delta)\),
+three-dimensional expansions \((k,\delta,x)\), and four-dimensional expansions
+\((k,\delta,x,y)\) for selected design parameters. Moving beyond four
+dimensions is possible in principle but becomes computationally expensive and
+less interpretable. The current project therefore treats four-dimensional
+calibration as a practical upper bound for Layer 2 sensitivity analysis, rather
+than as a claim that the full parameter vector has been globally optimized.
+
 For real market data, the app uses a continuous online variant. Instead of resetting wealth and position at every fold, it keeps one account alive. Every update window, recent bars generate a suggested parameter vector \(\tilde\theta_j\), and the live parameter is smoothed:
 \[
 \theta_j=(1-\rho)\theta_{j-1}+\rho\tilde\theta_j,
