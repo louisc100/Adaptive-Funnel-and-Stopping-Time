@@ -392,11 +392,6 @@ def make_report(
         gui_results,
         include_realized=True,
     )
-    fast_note = (
-        "Yes: reduced screening grid for tractability"
-        if args.fast
-        else "No: full configured grid"
-    )
     grid_rows = [
         ("k", args.k_grid if not args.fast else "0.8, 1.2"),
         ("delta", args.delta_grid if not args.fast else "1, 3"),
@@ -433,7 +428,11 @@ Layer 2 parameter set
 Pairs involving $\rho$ use online smoothing inside each fold, because $\rho$
 does not affect the static single-fold strategy directly.
 
-\section*{{Dataset and Protocol}}
+\section*{{Dataset, Protocol, and Search Grid}}
+\noindent
+\begin{{minipage}}[t]{{0.47\textwidth}}
+\subsection*{{Dataset and Protocol}}
+\small
 \begin{{tabular}}{{ll}}
 \toprule
 Data source & {opt3.latex_escape(metadata["source"])} \\
@@ -447,13 +446,11 @@ Cost per side & {args.cost_bps:.1f} bps \\
 Objective & $R^m + D^m + {opt3.LAMBDA_GAP:.2f}G$ \\
 \bottomrule
 \end{{tabular}}
-
-\section*{{Search Grid}}
-This run used \texttt{{--fast}}: {opt3.latex_escape(fast_note)}. The 4D grid
-can grow quickly because each experiment searches $(k,\delta,x,y)$, so the
-fast run should be read as a sensitivity screen rather than a final exhaustive
-optimization.
-
+\end{{minipage}}
+\hfill
+\begin{{minipage}}[t]{{0.49\textwidth}}
+\subsection*{{Search Grid}}
+\small
 \begin{{tabular}}{{ll}}
 \toprule
 Parameter & Values searched \\
@@ -461,6 +458,12 @@ Parameter & Values searched \\
 {grid_tex}
 \bottomrule
 \end{{tabular}}
+\end{{minipage}}
+\normalsize
+
+\paragraph{{Grid note.}}
+Each 4D row searches $(k,\delta,x,y)$. This report uses the same configured
+search grid as the 3D report unless \texttt{{--fast}} is explicitly supplied.
 
 \section*{{Stitched Walk-Forward Results}}
 \scriptsize
@@ -479,7 +482,7 @@ Experiment & Optimized & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Av
 \setlength{{\tabcolsep}}{{3pt}}
 \begin{{longtable}}{{p{{0.9in}}p{{1.15in}}rrrrrrrrrrp{{1.1in}}}}
 \toprule
-Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & End live \\
+Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected + end live \\
 \midrule
 {chr(10).join(gui_rows)}
 \bottomrule

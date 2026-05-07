@@ -578,19 +578,24 @@ def latex_escape(text: str) -> str:
 
 
 def selected_param_string(summary: dict[str, Any]) -> str:
+    selected_items = []
+    for name, value in summary.get("final_selected", {}).items():
+        if value == "":
+            selected_items.append(str(name))
+        else:
+            selected_items.append(f"{name}={format_param_value(value)}")
+
     final_live = summary.get("final_live")
     if final_live:
-        items = [
+        live_items = [
             f"end k={format_param_value(final_live.get('k'))}",
             f"end d={format_param_value(final_live.get('delta'))}",
         ]
-        return latex_escape(", ".join(items))
+        if selected_items:
+            return latex_escape(", ".join(selected_items + live_items))
+        return latex_escape(", ".join(live_items))
 
-    items = [
-        f"{name}={format_param_value(value)}"
-        for name, value in summary["final_selected"].items()
-    ]
-    return latex_escape(", ".join(items))
+    return latex_escape(", ".join(selected_items))
 
 
 def result_rows(
@@ -760,7 +765,7 @@ Experiment & Optimized & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Av
 \setlength{{\tabcolsep}}{{3pt}}
 \begin{{tabular}}{{p{{0.85in}}p{{0.95in}}rrrrrrrrrrp{{1.15in}}}}
 \toprule
-Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected / fixed \\
+Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected + end live \\
 \midrule
 {chr(10).join(gui_rows)}
 \bottomrule
@@ -851,7 +856,7 @@ Experiment & Optimized & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Av
 \setlength{{\tabcolsep}}{{3pt}}
 \begin{{tabular}}{{p{{0.85in}}p{{0.95in}}rrrrrrrrrrp{{1.15in}}}}
 \toprule
-Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected / fixed \\
+Experiment & Swept & Real. & MtM & BH & Gap & Max DD & Sharpe & Calmar & Trades & Avg hold & $\Delta$ MtM & Selected + end live \\
 \midrule
 {chr(10).join(gui_rows)}
 \bottomrule
