@@ -43,7 +43,8 @@ import numpy as np
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSlider, QLabel, QPushButton, QGridLayout, QGroupBox, QSizePolicy,
-    QMessageBox, QInputDialog,
+    QMessageBox, QInputDialog, QDialog, QListWidget, QListWidgetItem,
+    QDialogButtonBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -690,6 +691,67 @@ def select_walk_forward_params(
     return best
 
 
+PLAY_LEARN_GRIDS = {
+    "k": [0.8, 1.1, 1.4, 1.8, 2.2],
+    "delta": [1, 2, 3, 5, 8, 13, 21],
+    "q": [0.0, 5e-8, 1e-7, 2e-7, 5e-7],
+    "a": [0.02, 0.04, 0.06, 0.08],
+    "z_trend": [0.0, 0.25, 0.35, 0.50, 0.75],
+    "rho": [0.10, 0.25, 0.40, 0.60],
+}
+
+
+def select_online_learning_params(
+    train_lp,
+    optimize_params,
+    current_params,
+    c_buy,
+    c_sell,
+    garch_alpha,
+    garch_beta,
+):
+    """Choose selected Play-Learn parameters on the recent training window."""
+    sigma_seed = estimate_sigma_seed(train_lp)
+    train_safe_delta = max(1, len(train_lp) - 3)
+    fixed_current = dict(current_params)
+    if "delta" not in optimize_params:
+        fixed_current["delta"] = min(int(fixed_current["delta"]), train_safe_delta)
+    candidate_lists = [
+        PLAY_LEARN_GRIDS[name] if name in optimize_params else [fixed_current[name]]
+        for name in PLAY_LEARN_GRIDS
+    ]
+    best = None
+    names = list(PLAY_LEARN_GRIDS)
+    for values in np.array(np.meshgrid(*candidate_lists, indexing="ij")).T.reshape(-1, len(names)):
+        candidate = dict(zip(names, values))
+        candidate["delta"] = int(candidate["delta"])
+        if candidate["delta"] >= len(train_lp) - 2:
+            continue
+        data = run_strategy_on_log_prices(
+            train_lp,
+            k=candidate["k"],
+            delta=candidate["delta"],
+            sigma_seed=sigma_seed,
+            c_buy=c_buy,
+            c_sell=c_sell,
+            drift_process_var=candidate["q"],
+            garch_alpha=garch_alpha,
+            garch_beta=garch_beta,
+            trailing_stop=candidate["a"],
+            trend_entry_z=candidate["z_trend"],
+            mode="Play-Learn training fold",
+        )
+        metrics = summarize_simulation(data)
+        score = (
+            metrics["mtm_return"]
+            + metrics["max_mtm_drawdown"]
+            + 0.15 * metrics["benchmark_gap"]
+        )
+        if best is None or score > best["score"]:
+            best = {**candidate, "score": score, "sigma_seed": sigma_seed}
+    return best
+
+
 def stitch_walk_forward_tests(fold_results, folds, source, mode):
     """Build one animated out-of-sample path from sequential test folds."""
     if not fold_results:
@@ -923,6 +985,7 @@ def run_online_adaptive_strategy(
     trend_entry_z=0.35,
     k_grid=None,
     delta_grid=None,
+    optimize_params=None,
     source="Real daily prices",
 ):
     """
@@ -938,6 +1001,8 @@ def run_online_adaptive_strategy(
         k_grid = [0.8, 1.1, 1.4, 1.8, 2.2]
     if delta_grid is None:
         delta_grid = [1, 2, 3]
+    if optimize_params is None:
+        optimize_params = ["k", "delta"]
 
     prices = np.exp(lp)
     log_returns = np.diff(lp)
@@ -990,47 +1055,111 @@ def run_online_adaptive_strategy(
 
     current_k = float(k_init)
     current_delta = int(delta_init)
+    current_q = float(drift_process_var)
+    current_a = trailing_stop
+    current_z = trend_entry_z
+    current_rho = float(learning_rate)
 
     for t in range(1, N):
         # Update parameters at the start of each new week using only past data.
         if t > update_window and (t - 1) % update_window == 0:
             train_start = max(0, t - 1 - update_window)
             train_lp = lp[train_start:t]
-            chosen = select_walk_forward_params(
-                train_lp,
-                k_grid=k_grid,
-                delta_grid=delta_grid,
-                c_buy=c_buy,
-                c_sell=c_sell,
-                drift_process_var=drift_process_var,
-                garch_alpha=garch_alpha,
-                garch_beta=garch_beta,
-            )
+            if set(optimize_params) == {"k", "delta"}:
+                chosen = select_walk_forward_params(
+                    train_lp,
+                    k_grid=k_grid,
+                    delta_grid=delta_grid,
+                    c_buy=c_buy,
+                    c_sell=c_sell,
+                    drift_process_var=current_q,
+                    garch_alpha=garch_alpha,
+                    garch_beta=garch_beta,
+                )
+                if chosen is not None:
+                    chosen = {
+                        "k": chosen["k"],
+                        "delta": chosen["delta"],
+                        "q": current_q,
+                        "a": current_a,
+                        "z_trend": current_z,
+                        "rho": current_rho,
+                    }
+            else:
+                chosen = select_online_learning_params(
+                    train_lp,
+                    optimize_params=optimize_params,
+                    current_params={
+                        "k": current_k,
+                        "delta": current_delta,
+                        "q": current_q,
+                        "a": current_a,
+                        "z_trend": current_z,
+                        "rho": current_rho,
+                    },
+                    c_buy=c_buy,
+                    c_sell=c_sell,
+                    garch_alpha=garch_alpha,
+                    garch_beta=garch_beta,
+                )
             if chosen is not None:
                 old_k = current_k
                 old_delta = current_delta
+                old_q = current_q
+                old_a = current_a
+                old_z = current_z
+                old_rho = current_rho
+                target_rho = chosen["rho"] if "rho" in optimize_params else current_rho
+                current_rho = float(target_rho)
                 current_k = (
-                    (1.0 - learning_rate) * current_k
-                    + learning_rate * chosen["k"]
+                    (1.0 - current_rho) * current_k
+                    + current_rho * chosen["k"]
                 )
                 blended_delta = (
-                    (1.0 - learning_rate) * current_delta
-                    + learning_rate * chosen["delta"]
+                    (1.0 - current_rho) * current_delta
+                    + current_rho * chosen["delta"]
                 )
                 current_delta = int(np.clip(
                     round(blended_delta),
-                    min(delta_grid),
-                    max(delta_grid),
+                    min(PLAY_LEARN_GRIDS["delta"]),
+                    max(PLAY_LEARN_GRIDS["delta"]),
                 ))
+                if "q" in optimize_params:
+                    current_q = (
+                        (1.0 - current_rho) * current_q
+                        + current_rho * chosen["q"]
+                    )
+                if "a" in optimize_params:
+                    current_a = (
+                        (1.0 - current_rho) * current_a
+                        + current_rho * chosen["a"]
+                    )
+                if "z_trend" in optimize_params:
+                    current_z = (
+                        (1.0 - current_rho) * current_z
+                        + current_rho * chosen["z_trend"]
+                    )
                 parameter_log.append({
                     "t": t,
                     "train": (train_start, t - 1),
                     "suggested_k": chosen["k"],
                     "suggested_delta": chosen["delta"],
+                    "suggested_q": chosen["q"],
+                    "suggested_a": chosen["a"],
+                    "suggested_z_trend": chosen["z_trend"],
+                    "suggested_rho": chosen["rho"],
                     "old_k": old_k,
                     "old_delta": old_delta,
+                    "old_q": old_q,
+                    "old_a": old_a,
+                    "old_z_trend": old_z,
+                    "old_rho": old_rho,
                     "new_k": current_k,
                     "new_delta": current_delta,
+                    "new_q": current_q,
+                    "new_a": current_a,
+                    "new_z_trend": current_z,
+                    "new_rho": current_rho,
                 })
 
         k_path[t] = current_k
@@ -1068,9 +1197,9 @@ def run_online_adaptive_strategy(
                     and log_ret > h
                 )
                 trailing_exit = (
-                    trailing_stop is not None
+                    current_a is not None
                     and log_ret > h
-                    and trail_drawdown >= trailing_stop
+                    and trail_drawdown >= current_a
                 )
                 if funnel_exit or trailing_exit:
                     net_mult = net_liquidation_multiplier(
@@ -1097,8 +1226,9 @@ def run_online_adaptive_strategy(
                     bargain_entry = not np.isnan(Zd) and Zd < -current_k and M >= 0
                     trend_entry = (
                         trend_entry_z is not None
+                        and current_z is not None
                         and not np.isnan(Zd)
-                        and Zd > trend_entry_z
+                        and Zd > current_z
                         and M > 0
                     )
                     if bargain_entry or trend_entry:
@@ -1136,14 +1266,22 @@ def run_online_adaptive_strategy(
         mode="Real data online adaptive",
         source=source,
         parameter_log=parameter_log,
-        selected_params={"k": current_k, "delta": current_delta},
+        selected_params={
+            "k": current_k,
+            "delta": current_delta,
+            "q": current_q,
+            "a": current_a,
+            "z_trend": current_z,
+            "rho": current_rho,
+        },
         online_summary={
             "updates": len(parameter_log),
-            "learning_rate": learning_rate,
+            "learning_rate": current_rho,
             "update_window": update_window,
             "max_funnel_lookback": max_funnel_lookback,
-            "trailing_stop": trailing_stop,
-            "trend_entry_z": trend_entry_z,
+            "trailing_stop": current_a,
+            "trend_entry_z": current_z,
+            "optimized": list(optimize_params),
         },
     )
 
@@ -1157,6 +1295,9 @@ def run_real_price_walk_forward(
     drift_process_var=1e-7,
     garch_alpha=0.06,
     garch_beta=0.90,
+    learning_rate=0.25,
+    trailing_stop=0.04,
+    trend_entry_z=0.35,
 ):
     """Fetch real market bars and run one continuous online adaptive test."""
     full_lp = fetch_yahoo_log_prices(
@@ -1171,6 +1312,9 @@ def run_real_price_walk_forward(
         drift_process_var=drift_process_var,
         garch_alpha=garch_alpha,
         garch_beta=garch_beta,
+        learning_rate=learning_rate,
+        trailing_stop=trailing_stop,
+        trend_entry_z=trend_entry_z,
         source=f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}",
     )
     data["symbol"] = symbol.upper()
@@ -1349,19 +1493,19 @@ class MainWindow(QMainWindow):
 
         # ── right: controls ───────────────────────────────────────────────────
         ctrl_panel = QWidget()
-        ctrl_panel.setMinimumWidth(360)
-        ctrl_panel.setMaximumWidth(440)
+        ctrl_panel.setMinimumWidth(500)
+        ctrl_panel.setMaximumWidth(600)
         ctrl_layout = QVBoxLayout(ctrl_panel)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(6)
+        ctrl_layout.setSpacing(4)
         root.addWidget(ctrl_panel)
 
         # Parameters group
         param_box = QGroupBox("Parameters")
         param_box.setStyleSheet(self._group_style())
         param_grid = QGridLayout(param_box)
-        param_grid.setHorizontalSpacing(6)
-        param_grid.setVerticalSpacing(3)
+        param_grid.setHorizontalSpacing(10)
+        param_grid.setVerticalSpacing(2)
 
         self.sliders = {}
         defs = [
@@ -1370,14 +1514,19 @@ class MainWindow(QMainWindow):
             ("drift adapt  (Q x1e-8)", "drift_q", 0, 100, 10, 1),
             ("k  (threshold)",      "k",     5,  25,  12, 10),
             ("delta  (window)",     "delta", 1,  20,   8, 1),
+            ("trail a",             "trail_a", 0, 12,   4, 100),
+            ("z trend",             "z_trend", 0, 100, 35, 100),
+            ("rho  (learn rate)",   "rho",   5,  80,  25, 100),
             ("cost/side",           "cost",  0,  50,   0, 10000),
         ]
-        for row, (lbl, key, mn, mx, val, scale) in enumerate(defs):
+        for idx, (lbl, key, mn, mx, val, scale) in enumerate(defs):
+            block_row = (idx // 2) * 2
+            block_col = (idx % 2) * 3
             label = QLabel(lbl)
-            label.setStyleSheet(f"color:{TEXT_C};font-size:11px;")
+            label.setStyleSheet(f"color:{TEXT_C};font-size:10px;")
             val_lbl = QLabel(self._fmt(key, val / scale))
             val_lbl.setStyleSheet(
-                "color:white;font-size:11px;font-weight:bold;min-width:56px;")
+                "color:white;font-size:10px;font-weight:bold;min-width:46px;")
             val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             sl = QSlider(Qt.Horizontal)
             sl.setMinimum(mn); sl.setMaximum(mx); sl.setValue(val)
@@ -1386,9 +1535,11 @@ class MainWindow(QMainWindow):
                 lambda v, k=key, s=scale, vl=val_lbl:
                 vl.setText(self._fmt(k, v / s)))
             self.sliders[key] = (sl, scale)
-            param_grid.addWidget(label,   row * 2,     0, 1, 2)
-            param_grid.addWidget(sl,      row * 2 + 1, 0)
-            param_grid.addWidget(val_lbl, row * 2 + 1, 1)
+            param_grid.addWidget(label,   block_row,     block_col, 1, 3)
+            param_grid.addWidget(sl,      block_row + 1, block_col, 1, 2)
+            param_grid.addWidget(val_lbl, block_row + 1, block_col + 2)
+        param_grid.setColumnStretch(1, 1)
+        param_grid.setColumnStretch(4, 1)
 
         ctrl_layout.addWidget(param_box)
 
@@ -1396,7 +1547,7 @@ class MainWindow(QMainWindow):
         play_box = QGroupBox("Playback")
         play_box.setStyleSheet(self._group_style())
         play_layout = QVBoxLayout(play_box)
-        play_layout.setSpacing(5)
+        play_layout.setSpacing(3)
 
         # Speed slider
         sp_row = QHBoxLayout()
@@ -1467,7 +1618,7 @@ class MainWindow(QMainWindow):
         legend_box.setStyleSheet(self._group_style())
         leg_layout = QGridLayout(legend_box)
         leg_layout.setHorizontalSpacing(8)
-        leg_layout.setVerticalSpacing(2)
+        leg_layout.setVerticalSpacing(1)
         legend_items = [
             (BLUE,   "Price path"),
             (F_UPPER, "Upper funnel"),
@@ -1492,8 +1643,8 @@ class MainWindow(QMainWindow):
         stats_box = QGroupBox("Live stats")
         stats_box.setStyleSheet(self._group_style())
         stats_layout = QGridLayout(stats_box)
-        stats_layout.setHorizontalSpacing(10)
-        stats_layout.setVerticalSpacing(4)
+        stats_layout.setHorizontalSpacing(8)
+        stats_layout.setVerticalSpacing(2)
         stats_layout.setContentsMargins(6, 10, 6, 6)
 
         self.stat_labels = {}
@@ -1550,6 +1701,9 @@ class MainWindow(QMainWindow):
         if key == "drift_q": return f"{v:.0f}"
         if key == "k":     return f"{v:.1f}"
         if key == "delta": return f"{int(v)}"
+        if key == "trail_a": return f"{v:.2f}"
+        if key == "z_trend": return f"{v:.2f}"
+        if key == "rho": return f"{v:.2f}"
         if key == "cost":  return f"{v * 10000:.0f} bp"
         return str(v)
 
@@ -1588,6 +1742,8 @@ class MainWindow(QMainWindow):
             c_buy=p["cost"], c_sell=p["cost"],
             clip_noise=False,
             drift_process_var=p["drift_q"] * 1e-8,
+            trailing_stop=p["trail_a"],
+            trend_entry_z=p["z_trend"],
         )
         self.sim_data = data
         self.fixed_sim_data = data
@@ -1629,6 +1785,9 @@ class MainWindow(QMainWindow):
                 "Click Simulate first so Play-Learn can reuse the same path.",
             )
             return
+        optimize_params = self._choose_play_learn_params()
+        if optimize_params is None:
+            return
         p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
         try:
             data = run_online_adaptive_strategy(
@@ -1636,23 +1795,82 @@ class MainWindow(QMainWindow):
                 c_buy=p["cost"],
                 c_sell=p["cost"],
                 drift_process_var=p["drift_q"] * 1e-8,
+                learning_rate=p["rho"],
                 k_init=p["k"],
                 delta_init=int(p["delta"]),
-                k_grid=[0.8, 1.1, 1.4, 1.8, 2.2],
-                delta_grid=[1, 2, 3, 5, 8, 13, 21],
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
+                optimize_params=optimize_params,
                 source="Same synthetic path as Simulate",
             )
         except Exception as exc:
             QMessageBox.warning(self, "Play-Learn failed", str(exc))
             return
         data["mode"] = "Synthetic play-learn online adaptive"
-        data["source"] = "Same generated path; k/delta update every 5 bars"
+        data["source"] = (
+            "Same generated path; optimizing "
+            + ", ".join(optimize_params)
+            + " every 5 bars"
+        )
         self.sim_data = data
         self.scrubber.setMaximum(data["N"])
         self.scrubber.setEnabled(True)
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
+
+    def _choose_play_learn_params(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Choose Play-Learn parameters")
+        layout = QVBoxLayout(dialog)
+        info = QLabel("Choose up to 3 parameters to optimize every 5 bars.")
+        info.setStyleSheet(f"color:{TEXT_C};font-size:11px;")
+        layout.addWidget(info)
+
+        choices = [
+            ("k", "k  (funnel threshold)"),
+            ("delta", "delta  (momentum window)"),
+            ("q", "q  (drift adaptation)"),
+            ("a", "a  (trailing stop)"),
+            ("z_trend", "z_trend  (trend re-entry)"),
+            ("rho", "rho  (learning rate)"),
+        ]
+        widget = QListWidget()
+        widget.setStyleSheet(
+            f"QListWidget {{ background:{PANEL_BG}; color:{TEXT_C}; }}"
+            "QListWidget::item { padding: 3px; }"
+        )
+        for key, text in choices:
+            item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, key)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if key in ("k", "delta") else Qt.Unchecked)
+            widget.addItem(item)
+        layout.addWidget(widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+        selected = [
+            widget.item(i).data(Qt.UserRole)
+            for i in range(widget.count())
+            if widget.item(i).checkState() == Qt.Checked
+        ]
+        if not selected:
+            QMessageBox.warning(self, "No parameters selected", "Choose at least one parameter.")
+            return None
+        if len(selected) > 3:
+            QMessageBox.warning(
+                self,
+                "Too many parameters",
+                "Please choose at most 3 parameters for Play-Learn.",
+            )
+            return None
+        return selected
 
     def _walk_forward(self):
         self.timer.stop()
@@ -1691,6 +1909,9 @@ class MainWindow(QMainWindow):
                 c_buy=p["cost"],
                 c_sell=p["cost"],
                 drift_process_var=p["drift_q"] * 1e-8,
+                learning_rate=p["rho"],
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
             )
         except Exception as exc:
             QMessageBox.warning(self, "Real data fetch failed", str(exc))
