@@ -1314,6 +1314,8 @@ class MainWindow(QMainWindow):
         self._apply_dark_palette()
 
         self.sim_data  = None
+        self.fixed_sim_data = None
+        self.synthetic_lp = None
         self.current_t = 0
         self.playing   = False
         self.speed_idx = 2
@@ -1440,6 +1442,8 @@ class MainWindow(QMainWindow):
         btn_grid = QGridLayout()
         btn_grid.setSpacing(5)
         self.btn_gen   = self._btn("Simulate",      self._generate)
+        self.btn_learn = self._btn("Play-Learn",    self._play_learn, enabled=False)
+        self.btn_fixed = self._btn("Fixed Path",    self._fixed_path, enabled=False)
         self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
         self.btn_real  = self._btn("Real Data",     self._real_data)
         self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
@@ -1448,11 +1452,13 @@ class MainWindow(QMainWindow):
         self.btn_autoscale.setCheckable(True)
         self.btn_autoscale.setChecked(True)
         btn_grid.addWidget(self.btn_gen,   0, 0)
-        btn_grid.addWidget(self.btn_wf,    0, 1)
-        btn_grid.addWidget(self.btn_real,  1, 0, 1, 2)
-        btn_grid.addWidget(self.btn_play,  2, 0)
-        btn_grid.addWidget(self.btn_reset, 2, 1)
-        btn_grid.addWidget(self.btn_autoscale, 3, 0, 1, 2)
+        btn_grid.addWidget(self.btn_learn, 0, 1)
+        btn_grid.addWidget(self.btn_fixed, 1, 0)
+        btn_grid.addWidget(self.btn_wf,    1, 1)
+        btn_grid.addWidget(self.btn_real,  2, 0, 1, 2)
+        btn_grid.addWidget(self.btn_play,  3, 0)
+        btn_grid.addWidget(self.btn_reset, 3, 1)
+        btn_grid.addWidget(self.btn_autoscale, 4, 0, 1, 2)
         play_layout.addLayout(btn_grid)
         ctrl_layout.addWidget(play_box)
 
@@ -1583,6 +1589,64 @@ class MainWindow(QMainWindow):
             clip_noise=False,
             drift_process_var=p["drift_q"] * 1e-8,
         )
+        self.sim_data = data
+        self.fixed_sim_data = data
+        self.synthetic_lp = data["lp"].copy()
+        self.scrubber.setMaximum(data["N"])
+        self.scrubber.setEnabled(True)
+        self.btn_learn.setEnabled(True)
+        self.btn_fixed.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._set_frame(0)
+
+    def _fixed_path(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        if self.fixed_sim_data is None:
+            QMessageBox.information(
+                self,
+                "No fixed simulation",
+                "Click Simulate first to create a fixed run.",
+            )
+            return
+        self.sim_data = self.fixed_sim_data
+        self.scrubber.setMaximum(self.sim_data["N"])
+        self.scrubber.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._set_frame(0)
+
+    def _play_learn(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        if self.synthetic_lp is None:
+            QMessageBox.information(
+                self,
+                "No simulated path",
+                "Click Simulate first so Play-Learn can reuse the same path.",
+            )
+            return
+        p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+        try:
+            data = run_online_adaptive_strategy(
+                self.synthetic_lp,
+                c_buy=p["cost"],
+                c_sell=p["cost"],
+                drift_process_var=p["drift_q"] * 1e-8,
+                k_init=p["k"],
+                delta_init=int(p["delta"]),
+                k_grid=[0.8, 1.1, 1.4, 1.8, 2.2],
+                delta_grid=[1, 2, 3, 5, 8, 13, 21],
+                source="Same synthetic path as Simulate",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Play-Learn failed", str(exc))
+            return
+        data["mode"] = "Synthetic play-learn online adaptive"
+        data["source"] = "Same generated path; k/delta update every 5 bars"
         self.sim_data = data
         self.scrubber.setMaximum(data["N"])
         self.scrubber.setEnabled(True)
