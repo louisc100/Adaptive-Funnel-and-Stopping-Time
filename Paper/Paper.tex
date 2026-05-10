@@ -83,6 +83,18 @@ M_t=X_t-X_{t-\delta}.
 \]
 Positive \(M_t\) indicates recent upward movement, while \(M_t\leq 0\) indicates that recent upward momentum has stalled or reversed.
 
+The generalized-momentum extension replaces the fixed exit threshold \(0\) by a
+holding-time-dependent threshold
+\[
+f(t;\tau_b)
+=
+-\frac{c}{\sqrt{t-\tau_b}},
+\qquad c\geq 0.
+\]
+The baseline rule is recovered when \(c=0\). For \(c>0\), early exits require a
+stronger negative momentum signal, while later exits gradually relax back
+toward the original \(M_t\leq 0\) condition.
+
 Suppose buying incurs proportional cost \(c_{\mathrm{buy}}\geq 0\) and selling incurs proportional cost \(c_{\mathrm{sell}}\in[0,1)\). A trade entered at \(\tau_b\) and exited at \(t\) has positive after-cost realized multiplier exactly when
 \[
 \frac{(1-c_{\mathrm{sell}})S_t}
@@ -113,6 +125,13 @@ Z_{\tau_b,t}>k,\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
 \right\}.
 \]
 The first condition says price is high relative to the predictive funnel; the second says recent upward momentum has weakened; the third ensures the trade is profitable after transaction costs.
+
+In the generalized-momentum implementation, the second condition is replaced by
+\[
+M_t\leq f(t;\tau_b)
+=-\frac{c}{\sqrt{t-\tau_b}},
+\]
+while the funnel and profit-buffer conditions remain unchanged.
 
 \subsection{Bounded Diagnostic Funnel}
 
@@ -395,16 +414,26 @@ N_{\mathrm{trades}} & 9\\
 
 In this example, the strategy earned a positive mark-to-market return but underperformed buy-and-hold. This is a useful outcome rather than a failure of the framework: it demonstrates why benchmark gap, drawdown, exposure, trade count, Sharpe ratio, and Calmar ratio must be reported together. The no-realized-loss theorem concerns completed voluntary exits only; it does not imply benchmark outperformance.
 
-\section{Future Calibration Direction}
+\section{Layer 3 Extension Direction}
 
-Layer 3 can replace fixed entry and momentum thresholds with time-varying thresholds. One candidate is a holding-time-dependent momentum threshold of the form
+The first Layer 3 extension implemented in the simulator is generalized
+momentum. It replaces the fixed exit threshold \(M_t\leq 0\) with the
+holding-time-dependent threshold
 \[
 f(t;\tau_b)
 =
 -\frac{c}{\sqrt{t-\tau_b}},
 \qquad c>0,
 \]
-used in place of the fixed condition \(M_t\leq 0\) for exits. Early after entry, the threshold is more negative and therefore requires clearer momentum deterioration before selling; as holding time grows, the threshold moves toward zero. A similar idea could be used to calibrate \(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on time since the last sale. These extensions are deliberately left outside Layer 2 because they introduce new calibration degrees of freedom and should be tested by walk-forward validation.
+as described above. In the GUI, this extension can be run on the same simulated
+price path as the fixed baseline, making the comparison pathwise rather than
+distributional. The parameter \(c\) is tunable in the simulation controls.
+
+Further Layer 3 work may apply the same time-dependence idea to
+\(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on
+time since the last sale. These additions introduce new calibration degrees of
+freedom and should be tested by walk-forward validation before being promoted
+to the main rule.
 
 \section{Limitations}
 

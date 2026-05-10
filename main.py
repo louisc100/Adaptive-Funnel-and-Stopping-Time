@@ -287,6 +287,7 @@ def run_strategy_on_log_prices(
     max_funnel_lookback=60,
     trailing_stop=0.04,
     trend_entry_z=0.35,
+    generalized_momentum_c=None,
     mode="Simulation",
     extra=None,
 ):
@@ -369,12 +370,15 @@ def run_strategy_on_log_prices(
                 Zsig[t] = Z
                 log_ret = lp[t] - buy_lp
                 trail_drawdown = peak_lp - lp[t]
+                momentum_threshold = 0.0
+                if generalized_momentum_c is not None and el > 0:
+                    momentum_threshold = -float(generalized_momentum_c) / np.sqrt(el)
                 funnel_exit = (
                     el >= delta + 1
                     and not np.isnan(Z)
                     and Z > k
                     and not np.isnan(M)
-                    and M <= 0
+                    and M <= momentum_threshold
                     and log_ret > h
                 )
                 trailing_exit = (
@@ -459,6 +463,7 @@ def run_strategy_on_log_prices(
         max_funnel_lookback=max_funnel_lookback,
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
+        generalized_momentum_c=generalized_momentum_c,
         **(extra or {}),
     )
 
@@ -481,6 +486,7 @@ def run_simulation(
     max_funnel_lookback=60,
     trailing_stop=0.04,
     trend_entry_z=0.35,
+    generalized_momentum_c=None,
 ):
     """
     Simulate the adaptive funnel rule.
@@ -512,6 +518,7 @@ def run_simulation(
         max_funnel_lookback=max_funnel_lookback,
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
+        generalized_momentum_c=generalized_momentum_c,
         mode="Simulation",
         extra={"clip_noise": clip_noise},
     )
@@ -1517,6 +1524,7 @@ class MainWindow(QMainWindow):
             ("trail a",             "trail_a", 0, 12,   4, 100),
             ("z trend",             "z_trend", 0, 100, 35, 100),
             ("rho  (learn rate)",   "rho",   5,  80,  25, 100),
+            ("mom c  (gen)",        "mom_c", 0,  8,   2, 100),
             ("cost/side",           "cost",  0,  50,   0, 10000),
         ]
         for idx, (lbl, key, mn, mx, val, scale) in enumerate(defs):
@@ -1595,6 +1603,7 @@ class MainWindow(QMainWindow):
         self.btn_gen   = self._btn("Simulate",      self._generate)
         self.btn_learn = self._btn("Play-Learn",    self._play_learn, enabled=False)
         self.btn_fixed = self._btn("Fixed Path",    self._fixed_path, enabled=False)
+        self.btn_ext   = self._btn("Extensions",    self._extensions, enabled=False)
         self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
         self.btn_real  = self._btn("Real Data",     self._real_data)
         self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
@@ -1605,8 +1614,9 @@ class MainWindow(QMainWindow):
         btn_grid.addWidget(self.btn_gen,   0, 0)
         btn_grid.addWidget(self.btn_learn, 0, 1)
         btn_grid.addWidget(self.btn_fixed, 1, 0)
-        btn_grid.addWidget(self.btn_wf,    1, 1)
-        btn_grid.addWidget(self.btn_real,  2, 0, 1, 2)
+        btn_grid.addWidget(self.btn_ext,   1, 1)
+        btn_grid.addWidget(self.btn_wf,    2, 0)
+        btn_grid.addWidget(self.btn_real,  2, 1)
         btn_grid.addWidget(self.btn_play,  3, 0)
         btn_grid.addWidget(self.btn_reset, 3, 1)
         btn_grid.addWidget(self.btn_autoscale, 4, 0, 1, 2)
@@ -1704,6 +1714,7 @@ class MainWindow(QMainWindow):
         if key == "trail_a": return f"{v:.2f}"
         if key == "z_trend": return f"{v:.2f}"
         if key == "rho": return f"{v:.2f}"
+        if key == "mom_c": return f"{v:.2f}"
         if key == "cost":  return f"{v * 10000:.0f} bp"
         return str(v)
 
@@ -1752,6 +1763,7 @@ class MainWindow(QMainWindow):
         self.scrubber.setEnabled(True)
         self.btn_learn.setEnabled(True)
         self.btn_fixed.setEnabled(True)
+        self.btn_ext.setEnabled(True)
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
@@ -1773,6 +1785,74 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
+
+    def _extensions(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        if self.synthetic_lp is None:
+            QMessageBox.information(
+                self,
+                "No simulated path",
+                "Click Simulate first so Extensions can reuse the same path.",
+            )
+            return
+        extension = self._choose_extension()
+        if extension is None:
+            return
+        p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+        if extension == "generalized_momentum":
+            sigma_seed = estimate_sigma_seed(self.synthetic_lp)
+            data = run_strategy_on_log_prices(
+                self.synthetic_lp,
+                k=p["k"],
+                delta=int(p["delta"]),
+                sigma_seed=sigma_seed,
+                c_buy=p["cost"],
+                c_sell=p["cost"],
+                drift_process_var=p["drift_q"] * 1e-8,
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
+                generalized_momentum_c=p["mom_c"],
+                mode="Synthetic generalized momentum",
+                extra={
+                    "source": "Same generated path; generalized momentum exit",
+                    "selected_params": {
+                        "k": p["k"],
+                        "delta": int(p["delta"]),
+                        "mom_c": p["mom_c"],
+                    },
+                },
+            )
+        else:
+            QMessageBox.information(
+                self,
+                "Extension unavailable",
+                "This extension is not implemented yet.",
+            )
+            return
+        self.sim_data = data
+        self.scrubber.setMaximum(data["N"])
+        self.scrubber.setEnabled(True)
+        self.btn_play.setEnabled(True)
+        self.btn_reset.setEnabled(True)
+        self._set_frame(0)
+
+    def _choose_extension(self):
+        items = ["Generalized Momentum"]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Choose extension",
+            "Run an extension on the current simulated path:",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        if choice == "Generalized Momentum":
+            return "generalized_momentum"
+        return None
 
     def _play_learn(self):
         self.timer.stop()
