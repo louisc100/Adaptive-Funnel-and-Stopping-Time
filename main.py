@@ -1303,6 +1303,8 @@ def run_real_price_walk_forward(
     garch_alpha=0.06,
     garch_beta=0.90,
     learning_rate=0.25,
+    k_init=1.2,
+    delta_init=3,
     trailing_stop=0.04,
     trend_entry_z=0.35,
 ):
@@ -1320,6 +1322,8 @@ def run_real_price_walk_forward(
         garch_alpha=garch_alpha,
         garch_beta=garch_beta,
         learning_rate=learning_rate,
+        k_init=k_init,
+        delta_init=delta_init,
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
         source=f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}",
@@ -1980,19 +1984,59 @@ class MainWindow(QMainWindow):
         if period is None:
             return
         lookback_days, interval = period
+        mode = self._choose_real_mode()
+        if mode is None:
+            return
         p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
         try:
-            data = run_real_price_walk_forward(
+            full_lp = fetch_yahoo_log_prices(
                 symbol=symbol,
-                lookback_days=lookback_days,
+                days=lookback_days,
                 interval=interval,
-                c_buy=p["cost"],
-                c_sell=p["cost"],
-                drift_process_var=p["drift_q"] * 1e-8,
-                learning_rate=p["rho"],
-                trailing_stop=p["trail_a"],
-                trend_entry_z=p["z_trend"],
             )
+            source = f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}"
+            if mode == "fixed":
+                sigma_seed = estimate_sigma_seed(full_lp)
+                data = run_strategy_on_log_prices(
+                    full_lp,
+                    k=p["k"],
+                    delta=int(p["delta"]),
+                    sigma_seed=sigma_seed,
+                    c_buy=p["cost"],
+                    c_sell=p["cost"],
+                    drift_process_var=p["drift_q"] * 1e-8,
+                    trailing_stop=p["trail_a"],
+                    trend_entry_z=p["z_trend"],
+                    mode=f"Real {symbol.upper()} fixed sliders",
+                    extra={
+                        "source": source,
+                        "selected_params": {
+                            "k": p["k"],
+                            "delta": int(p["delta"]),
+                            "q": p["drift_q"] * 1e-8,
+                            "a": p["trail_a"],
+                            "z_trend": p["z_trend"],
+                        },
+                    },
+                )
+            else:
+                data = run_online_adaptive_strategy(
+                    full_lp,
+                    c_buy=p["cost"],
+                    c_sell=p["cost"],
+                    drift_process_var=p["drift_q"] * 1e-8,
+                    learning_rate=p["rho"],
+                    k_init=p["k"],
+                    delta_init=int(p["delta"]),
+                    trailing_stop=p["trail_a"],
+                    trend_entry_z=p["z_trend"],
+                    source=source,
+                )
+                data["mode"] = f"Real {symbol.upper()} online adaptive"
+            data["symbol"] = symbol.upper()
+            data["lookback_days"] = lookback_days
+            data["interval"] = interval
+            data["periods_per_year"] = periods_per_year_for_interval(interval)
         except Exception as exc:
             QMessageBox.warning(self, "Real data fetch failed", str(exc))
             return
@@ -2002,6 +2046,23 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
+
+    def _choose_real_mode(self):
+        items = [
+            "Fixed slider values",
+            "Online optimization every 5 bars",
+        ]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Choose real-data mode",
+            "How should the algorithm use the fetched Yahoo path?",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+        return "learn" if choice.startswith("Online") else "fixed"
 
     def _choose_real_symbol(self):
         items = [f"{symbol} - {name}" for symbol, name in REAL_DATA_CHOICES]
