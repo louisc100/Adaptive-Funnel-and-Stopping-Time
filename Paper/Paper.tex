@@ -338,6 +338,45 @@ from an initial variance estimate \(\bar\sigma^2\). The funnel variance accumula
 V_\tau(t)=\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1}.
 \]
 
+\subsection{Regime HMM Extension}
+
+The Phase 7 simulator extension adds a three-state Gaussian hidden Markov model
+for regime-aware funnel estimates. Let
+\[
+R_t\in\{1,2,3\}
+\]
+denote a latent regime, interpreted in the implementation as calm, mixed, and
+stress states. Conditional on \(R_t=j\), returns satisfy
+\[
+r_t\mid R_t=j\sim\mathcal N(\mu_j,\sigma_j^2),
+\]
+and \(R_t\) evolves according to a persistent Markov transition matrix. The
+implementation initializes \((\mu_j,\sigma_j^2)\) from an early training segment
+by sorting returns into volatility buckets, then uses forward filtering online.
+
+Let
+\[
+\pi_{t|t-1}(j)=P(R_t=j\mid r_{1:t-1})
+\]
+be the predicted regime probability before observing \(r_t\). The HMM funnel
+forecast is the mixture mean
+\[
+\hat\mu^{\mathrm{HMM}}_{t|t-1}
+=
+\sum_{j=1}^{3}\pi_{t|t-1}(j)\mu_j,
+\]
+with mixture variance
+\[
+\hat\sigma^{2,\mathrm{HMM}}_{t|t-1}
+=
+\sum_{j=1}^{3}\pi_{t|t-1}(j)(\sigma_j^2+\mu_j^2)
+-\left(\hat\mu^{\mathrm{HMM}}_{t|t-1}\right)^2.
+\]
+These forecasts replace the Kalman/GARCH forecasts inside \(C_\tau(t)\) and
+\(V_\tau(t)\), while the trading rule and profit-buffer condition remain
+unchanged. The GUI displays the most likely regime and its posterior
+probability during playback.
+
 \section{Backtesting and Real-Data Implementation}
 
 The offline walk-forward procedure selects parameters using only past data. For fold \(j\), let \(\mathcal T_j\) be the training window and \(\mathcal O_j\) the following out-of-sample window. For candidate parameter vector \(\theta\), the training objective used in the implementation has the form
@@ -416,9 +455,9 @@ In this example, the strategy earned a positive mark-to-market return but underp
 
 \section{Layer 3 Extension Direction}
 
-The first Layer 3 extension implemented in the simulator is generalized
-momentum. It replaces the fixed exit threshold \(M_t\leq 0\) with the
-holding-time-dependent threshold
+The first Layer 3 extensions implemented in the simulator are generalized
+momentum and a three-state regime HMM. Generalized momentum replaces the fixed
+exit threshold \(M_t\leq 0\) with the holding-time-dependent threshold
 \[
 f(t;\tau_b)
 =
@@ -428,6 +467,9 @@ f(t;\tau_b)
 as described above. In the GUI, this extension can be run on the same simulated
 price path as the fixed baseline, making the comparison pathwise rather than
 distributional. The parameter \(c\) is tunable in the simulation controls.
+The HMM extension keeps the same trading rule but replaces the Kalman/GARCH
+funnel forecasts with regime-weighted drift and volatility forecasts. It also
+adds a live regime indicator to the dashboard.
 
 Further Layer 3 work may apply the same time-dependence idea to
 \(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on

@@ -273,6 +273,101 @@ def garch_volatility_estimates(
     return var_prior, sigma_hat
 
 
+def gaussian_likelihood(x, means, variances):
+    """Numerically safe Gaussian density values for HMM filtering."""
+    variances = np.maximum(np.asarray(variances, dtype=float), 1e-12)
+    means = np.asarray(means, dtype=float)
+    z = (x - means) / np.sqrt(variances)
+    return np.exp(-0.5 * z * z) / np.sqrt(2.0 * np.pi * variances)
+
+
+def regime_hmm_estimates(log_returns, n_states=3, init_window=60, stay_prob=0.94):
+    """
+    Lightweight Gaussian HMM filter for regime-aware funnel forecasts.
+
+    The emission parameters are initialized from an early training window by
+    sorting returns into volatility buckets. Forward filtering is then causal:
+    the forecast for step s uses the predicted regime distribution before
+    observing return s, while the displayed state uses the posterior after it.
+    """
+    r = np.asarray(log_returns, dtype=float)
+    n_steps = len(r)
+    n_states = int(np.clip(n_states, 2, 5))
+    init_n = int(np.clip(init_window, n_states * 5, max(n_states * 5, n_steps)))
+    train = r[:init_n] if init_n > 0 else r
+    if train.size < n_states:
+        train = r if r.size else np.zeros(n_states)
+
+    center = float(np.mean(train)) if train.size else 0.0
+    vol_score = np.abs(train - center)
+    order = np.argsort(vol_score)
+    buckets = np.array_split(train[order], n_states)
+
+    means = np.array([
+        float(np.mean(bucket)) if bucket.size else center
+        for bucket in buckets
+    ])
+    variances = np.array([
+        float(np.var(bucket, ddof=1)) if bucket.size > 1 else float(np.var(train))
+        for bucket in buckets
+    ])
+    global_var = float(np.var(train, ddof=1)) if train.size > 1 else 1e-4
+    variances = np.maximum(variances, max(global_var * 0.05, 1e-8))
+
+    # Label states from calm to stress by increasing volatility.
+    state_order = np.argsort(variances)
+    means = means[state_order]
+    variances = variances[state_order]
+
+    off_diag = (1.0 - stay_prob) / max(n_states - 1, 1)
+    trans = np.full((n_states, n_states), off_diag)
+    np.fill_diagonal(trans, stay_prob)
+
+    prior = np.full(n_states, 1.0 / n_states)
+    probs = np.zeros((n_steps + 1, n_states))
+    mu_prior = np.zeros(n_steps + 1)
+    mu_hat = np.zeros(n_steps + 1)
+    var_prior = np.zeros(n_steps + 1)
+    sigma_hat = np.zeros(n_steps + 1)
+    regime_state = np.zeros(n_steps + 1, dtype=int)
+    probs[0] = prior
+    mu_prior[0] = float(np.dot(prior, means))
+    second_moment = np.dot(prior, variances + means * means)
+    var_prior[0] = max(second_moment - mu_prior[0] ** 2, 1e-12)
+    sigma_hat[0] = np.sqrt(var_prior[0])
+
+    post = prior
+    for step, ret in enumerate(r, start=1):
+        pred = post @ trans
+        pred = pred / max(np.sum(pred), 1e-12)
+        mu_pred = float(np.dot(pred, means))
+        second_moment = float(np.dot(pred, variances + means * means))
+        var_pred = max(second_moment - mu_pred * mu_pred, 1e-12)
+        mu_prior[step] = mu_pred
+        var_prior[step] = var_pred
+        sigma_hat[step] = np.sqrt(var_pred)
+
+        likelihood = gaussian_likelihood(ret, means, variances)
+        post = pred * likelihood
+        post = post / max(np.sum(post), 1e-12)
+        probs[step] = post
+        regime_state[step] = int(np.argmax(post))
+        mu_hat[step] = float(np.dot(post, means))
+
+    return {
+        "mu_prior": mu_prior,
+        "mu_hat": mu_hat,
+        "var_prior": var_prior,
+        "sigma_hat": sigma_hat,
+        "regime_probs": probs,
+        "regime_state": regime_state,
+        "regime_means": means,
+        "regime_variances": variances,
+        "transition_matrix": trans,
+        "regime_labels": ["calm", "mixed", "stress"][:n_states],
+    }
+
+
 def run_strategy_on_log_prices(
     lp,
     k,
@@ -288,6 +383,8 @@ def run_strategy_on_log_prices(
     trailing_stop=0.04,
     trend_entry_z=0.35,
     generalized_momentum_c=None,
+    use_hmm_regime=False,
+    hmm_states=3,
     mode="Simulation",
     extra=None,
 ):
@@ -301,19 +398,27 @@ def run_strategy_on_log_prices(
     n_steps = lp.size - 1
     N = lp.size
     sigma_seed = max(float(sigma_seed), 1e-6)
-    mu_step, mu_hat = kalman_drift_estimates(
-        log_returns,
-        init_mu=drift_init,
-        obs_var=sigma_seed * sigma_seed,
-        process_var=drift_process_var,
-    )
-    var_step, sigma_hat = garch_volatility_estimates(
-        log_returns,
-        mu_prior=mu_step,
-        init_var=sigma_seed * sigma_seed,
-        alpha=garch_alpha,
-        beta=garch_beta,
-    )
+    hmm_info = None
+    if use_hmm_regime:
+        hmm_info = regime_hmm_estimates(log_returns, n_states=hmm_states)
+        mu_step = hmm_info["mu_prior"]
+        mu_hat = hmm_info["mu_hat"]
+        var_step = hmm_info["var_prior"]
+        sigma_hat = hmm_info["sigma_hat"]
+    else:
+        mu_step, mu_hat = kalman_drift_estimates(
+            log_returns,
+            init_mu=drift_init,
+            obs_var=sigma_seed * sigma_seed,
+            process_var=drift_process_var,
+        )
+        var_step, sigma_hat = garch_volatility_estimates(
+            log_returns,
+            mu_prior=mu_step,
+            init_var=sigma_seed * sigma_seed,
+            alpha=garch_alpha,
+            beta=garch_beta,
+        )
     cumulative_drift = np.zeros(N)
     cumulative_var = np.zeros(N)
     cumulative_drift[1:] = np.cumsum(mu_step[1:])
@@ -448,6 +553,20 @@ def run_strategy_on_log_prices(
                 prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
             )
 
+    hmm_extra = {}
+    if hmm_info is not None:
+        hmm_extra = {
+            key: hmm_info[key]
+            for key in (
+                "regime_probs",
+                "regime_state",
+                "regime_means",
+                "regime_variances",
+                "transition_matrix",
+                "regime_labels",
+            )
+        }
+
     return dict(
         prices=prices, lp=lp,
         realized_w=realized_w, portfolio_w=portfolio_w, buy_hold_w=buy_hold_w,
@@ -464,6 +583,9 @@ def run_strategy_on_log_prices(
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
         generalized_momentum_c=generalized_momentum_c,
+        use_hmm_regime=use_hmm_regime,
+        hmm_states=hmm_states,
+        **hmm_extra,
         **(extra or {}),
     )
 
@@ -1668,6 +1790,7 @@ class MainWindow(QMainWindow):
             ("t",        "t"),
             ("price",    "Price"),
             ("pos",      "Position"),
+            ("regime",   "Regime"),
             ("z",        "Z"),
             ("mu_hat",   "mu hat"),
             ("sigma_hat", "sigma hat"),
@@ -1828,6 +1951,30 @@ class MainWindow(QMainWindow):
                     },
                 },
             )
+        elif extension == "regime_hmm":
+            sigma_seed = estimate_sigma_seed(self.synthetic_lp)
+            data = run_strategy_on_log_prices(
+                self.synthetic_lp,
+                k=p["k"],
+                delta=int(p["delta"]),
+                sigma_seed=sigma_seed,
+                c_buy=p["cost"],
+                c_sell=p["cost"],
+                drift_process_var=p["drift_q"] * 1e-8,
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
+                use_hmm_regime=True,
+                hmm_states=3,
+                mode="Synthetic regime HMM",
+                extra={
+                    "source": "Same generated path; 3-state HMM funnel",
+                    "selected_params": {
+                        "k": p["k"],
+                        "delta": int(p["delta"]),
+                        "states": 3,
+                    },
+                },
+            )
         else:
             QMessageBox.information(
                 self,
@@ -1843,7 +1990,7 @@ class MainWindow(QMainWindow):
         self._set_frame(0)
 
     def _choose_extension(self):
-        items = ["Generalized Momentum"]
+        items = ["Generalized Momentum", "Regime HMM"]
         choice, ok = QInputDialog.getItem(
             self,
             "Choose extension",
@@ -1856,6 +2003,8 @@ class MainWindow(QMainWindow):
             return None
         if choice == "Generalized Momentum":
             return "generalized_momentum"
+        if choice == "Regime HMM":
+            return "regime_hmm"
         return None
 
     def _play_learn(self):
@@ -2206,6 +2355,18 @@ class MainWindow(QMainWindow):
             self.stat_labels["sigma_hat"].setText(f"{d['sigma_hat'][t]:.4f}")
             self.stat_labels["h"].setText(f"{d['h']:.5f}")
             self.stat_labels["pos"].setText(pos)
+            if "regime_state" in d:
+                labels = d.get("regime_labels", [])
+                state = int(d["regime_state"][t])
+                name = labels[state] if state < len(labels) else f"S{state + 1}"
+                probs = d.get("regime_probs")
+                conf = probs[t, state] if probs is not None else np.nan
+                self.stat_labels["regime"].setText(
+                    f"{state + 1}:{name} {conf:.0%}" if np.isfinite(conf)
+                    else f"{state + 1}:{name}"
+                )
+            else:
+                self.stat_labels["regime"].setText("n/a")
 
             self.stat_labels["wealth"].setStyleSheet(
                 f"color:{'white' if rw >= 1000 else RED};"
@@ -2225,6 +2386,14 @@ class MainWindow(QMainWindow):
             self.stat_labels["pos"].setStyleSheet(
                 f"color:{GREEN if d['holding'][t] else TEXT_C};"
                 "font-size:12px;font-weight:bold;")
+            regime_state = d.get("regime_state")
+            if regime_state is not None:
+                state = int(regime_state[t])
+                regime_color = [GREEN, AMBER, RED][min(state, 2)]
+            else:
+                regime_color = TEXT_C
+            self.stat_labels["regime"].setStyleSheet(
+                f"color:{regime_color};font-size:12px;font-weight:bold;")
 
     def _on_scrub_press(self):
         self.timer.stop()
