@@ -81,19 +81,7 @@ For an integer window \(\delta\geq 1\), define the finite-difference momentum st
 \[
 M_t=X_t-X_{t-\delta}.
 \]
-Positive \(M_t\) indicates recent upward movement, while \(M_t\leq 0\) indicates that recent upward momentum has stalled or reversed.
-
-The generalized-momentum extension replaces the fixed exit threshold \(0\) by a
-holding-time-dependent threshold
-\[
-f(t;\tau_b)
-=
--\frac{c}{\sqrt{t-\tau_b}},
-\qquad c\geq 0.
-\]
-The baseline rule is recovered when \(c=0\). For \(c>0\), early exits require a
-stronger negative momentum signal, while later exits gradually relax back
-toward the original \(M_t\leq 0\) condition.
+Positive \(M_t\) indicates recent upward movement, while \(M_t\leq 0\) indicates that recent upward momentum has stalled or reversed. More precisely, \(M_t\leq 0\) means that the log price has not increased relative to \(t-\delta\); it does not imply monotone decline during every intermediate step. A generalized momentum version is discussed in the Extensions section.
 
 Suppose buying incurs proportional cost \(c_{\mathrm{buy}}\geq 0\) and selling incurs proportional cost \(c_{\mathrm{sell}}\in[0,1)\). A trade entered at \(\tau_b\) and exited at \(t\) has positive after-cost realized multiplier exactly when
 \[
@@ -126,12 +114,7 @@ Z_{\tau_b,t}>k,\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
 \]
 The first condition says price is high relative to the predictive funnel; the second says recent upward momentum has weakened; the third ensures the trade is profitable after transaction costs.
 
-In the generalized-momentum implementation, the second condition is replaced by
-\[
-M_t\leq f(t;\tau_b)
-=-\frac{c}{\sqrt{t-\tau_b}},
-\]
-while the funnel and profit-buffer conditions remain unchanged.
+The Extensions section describes an optional generalized momentum variant that modifies only the second condition while leaving the funnel and profit-buffer conditions unchanged.
 
 \subsection{Bounded Diagnostic Funnel}
 
@@ -338,44 +321,7 @@ from an initial variance estimate \(\bar\sigma^2\). The funnel variance accumula
 V_\tau(t)=\sum_{s=\tau+1}^{t}\hat\sigma^2_{s|s-1}.
 \]
 
-\subsection{Regime HMM Extension}
-
-The Phase 7 simulator extension adds a three-state Gaussian hidden Markov model
-for regime-aware funnel estimates. Let
-\[
-R_t\in\{1,2,3\}
-\]
-denote a latent regime, interpreted in the implementation as calm, mixed, and
-stress states. Conditional on \(R_t=j\), returns satisfy
-\[
-r_t\mid R_t=j\sim\mathcal N(\mu_j,\sigma_j^2),
-\]
-and \(R_t\) evolves according to a persistent Markov transition matrix. The
-implementation initializes \((\mu_j,\sigma_j^2)\) from an early training segment
-by sorting returns into volatility buckets, then uses forward filtering online.
-
-Let
-\[
-\pi_{t|t-1}(j)=P(R_t=j\mid r_{1:t-1})
-\]
-be the predicted regime probability before observing \(r_t\). The HMM funnel
-forecast is the mixture mean
-\[
-\hat\mu^{\mathrm{HMM}}_{t|t-1}
-=
-\sum_{j=1}^{3}\pi_{t|t-1}(j)\mu_j,
-\]
-with mixture variance
-\[
-\hat\sigma^{2,\mathrm{HMM}}_{t|t-1}
-=
-\sum_{j=1}^{3}\pi_{t|t-1}(j)(\sigma_j^2+\mu_j^2)
--\left(\hat\mu^{\mathrm{HMM}}_{t|t-1}\right)^2.
-\]
-These forecasts replace the Kalman/GARCH forecasts inside \(C_\tau(t)\) and
-\(V_\tau(t)\), while the trading rule and profit-buffer condition remain
-unchanged. The GUI displays the most likely regime and its posterior
-probability during playback.
+The Extensions section describes an optional regime-filtering layer based on a three-state hidden Markov model. In that mode, the same trading rule is retained but the one-step funnel inputs are filtered through latent regime probabilities.
 
 \section{Backtesting and Real-Data Implementation}
 
@@ -453,23 +399,73 @@ N_{\mathrm{trades}} & 9\\
 
 In this example, the strategy earned a positive mark-to-market return but underperformed buy-and-hold. This is a useful outcome rather than a failure of the framework: it demonstrates why benchmark gap, drawdown, exposure, trade count, Sharpe ratio, and Calmar ratio must be reported together. The no-realized-loss theorem concerns completed voluntary exits only; it does not imply benchmark outperformance.
 
-\section{Layer 3 Extension Direction}
+\section{Extensions}
 
-The first Layer 3 extensions implemented in the simulator are generalized
-momentum and a three-state regime HMM. Generalized momentum replaces the fixed
-exit threshold \(M_t\leq 0\) with the holding-time-dependent threshold
+The first implemented Layer 3 extensions are generalized momentum and a
+three-state regime HMM filter. Both are available in the GUI for simulated
+paths and real Yahoo Finance data, so they can be compared against the fixed
+baseline and the online optimization mode on the same selected price path.
+
+\subsection{Generalized Momentum}
+
+Generalized momentum replaces the fixed exit threshold \(M_t\leq 0\) with the
+holding-time-dependent threshold
 \[
 f(t;\tau_b)
 =
 -\frac{c}{\sqrt{t-\tau_b}},
-\qquad c>0,
+\qquad c\geq 0.
 \]
-as described above. In the GUI, this extension can be run on the same simulated
-price path as the fixed baseline, making the comparison pathwise rather than
-distributional. The parameter \(c\) is tunable in the simulation controls.
-The HMM extension keeps the same trading rule but replaces the Kalman/GARCH
-funnel forecasts with regime-weighted drift and volatility forecasts. It also
-adds a live regime indicator to the dashboard.
+The baseline rule is recovered when \(c=0\). For \(c>0\), early exits require a
+stronger negative momentum signal, while later exits gradually relax back
+toward the original \(M_t\leq 0\) condition. The funnel condition
+\(Z_{\tau_b,t}>k\) and the transaction-cost profit buffer
+\(X_t-X_{\tau_b}>h\) are unchanged, so the no-realized-loss theorem still
+applies to completed voluntary exits. The parameter \(c\) is tunable in the
+GUI.
+
+\subsection{Regime HMM Filtering}
+
+The HMM extension is best viewed as a filtering layer for the funnel, not as a
+separate trading rule. The buy, sell, re-entry, and profit-buffer logic remain
+the same. What changes is the estimate of the next-step drift and variance used
+inside \(C_\tau(t)\) and \(V_\tau(t)\).
+
+Let
+\[
+R_t\in\{1,2,3\}
+\]
+denote a latent regime, interpreted in the implementation as calm, mixed, and
+stress states. Conditional on \(R_t=j\), returns satisfy
+\[
+r_t\mid R_t=j\sim\mathcal N(\mu_j,\sigma_j^2),
+\]
+and \(R_t\) evolves according to a persistent Markov transition matrix. The
+implementation initializes \((\mu_j,\sigma_j^2)\) from an early training segment
+by sorting returns into volatility buckets, then updates regime probabilities
+online by forward filtering.
+
+Let
+\[
+\pi_{t|t-1}(j)=P(R_t=j\mid r_{1:t-1})
+\]
+be the predicted regime probability before observing \(r_t\). The filtered
+one-step drift input is the mixture mean
+\[
+\hat\mu^{\mathrm{HMM}}_{t|t-1}
+=
+\sum_{j=1}^{3}\pi_{t|t-1}(j)\mu_j,
+\]
+with filtered mixture variance
+\[
+\hat\sigma^{2,\mathrm{HMM}}_{t|t-1}
+=
+\sum_{j=1}^{3}\pi_{t|t-1}(j)(\sigma_j^2+\mu_j^2)
+-\left(\hat\mu^{\mathrm{HMM}}_{t|t-1}\right)^2.
+\]
+These filtered inputs replace the Kalman/GARCH inputs inside the diagnostic
+funnel. The GUI also displays the most likely regime and posterior probability
+during playback, making the extension interpretable as the path evolves.
 
 Further Layer 3 work may apply the same time-dependence idea to
 \(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on
