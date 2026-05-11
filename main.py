@@ -1814,6 +1814,7 @@ class MainWindow(QMainWindow):
         self.btn_ext   = self._btn("Extensions",    self._extensions, enabled=False)
         self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
         self.btn_real  = self._btn("Real Data",     self._real_data)
+        self.btn_paper = self._btn("Paper Check",   self._paper_check)
         self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
         self.btn_reset = self._btn("↺  Reset",      self._reset,       enabled=False)
         self.btn_autoscale = self._btn("Auto-scale ON", self._toggle_autoscale)
@@ -1825,9 +1826,10 @@ class MainWindow(QMainWindow):
         btn_grid.addWidget(self.btn_ext,   1, 1)
         btn_grid.addWidget(self.btn_wf,    2, 0)
         btn_grid.addWidget(self.btn_real,  2, 1)
-        btn_grid.addWidget(self.btn_play,  3, 0)
-        btn_grid.addWidget(self.btn_reset, 3, 1)
-        btn_grid.addWidget(self.btn_autoscale, 4, 0, 1, 2)
+        btn_grid.addWidget(self.btn_paper, 3, 0, 1, 2)
+        btn_grid.addWidget(self.btn_play,  4, 0)
+        btn_grid.addWidget(self.btn_reset, 4, 1)
+        btn_grid.addWidget(self.btn_autoscale, 5, 0, 1, 2)
         play_layout.addLayout(btn_grid)
         ctrl_layout.addWidget(play_box)
 
@@ -2360,6 +2362,76 @@ class MainWindow(QMainWindow):
         self.btn_play.setEnabled(True)
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
+
+    def _paper_check(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        symbol = self._choose_real_symbol()
+        if symbol is None:
+            return
+        period = self._choose_real_period()
+        if period is None:
+            return
+        lookback_days, interval = period
+        mode = self._choose_real_mode()
+        if mode is None:
+            return
+        optimize_params = None
+        if mode == "learn":
+            optimize_params = self._choose_play_learn_params(
+                title="Choose paper-trading online parameters",
+                prompt="Choose up to 4 parameters to optimize every 5 bars for the paper check.",
+            )
+            if optimize_params is None:
+                return
+        p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+        try:
+            import paper_trading
+
+            config = paper_trading.StrategyConfig(
+                symbol=symbol,
+                lookback_days=lookback_days,
+                interval=interval,
+                mode=mode,
+                k=p["k"],
+                delta=int(p["delta"]),
+                drift_q=p["drift_q"] * 1e-8,
+                lookback_L=int(p["lookback_L"]),
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
+                learning_rate=p["rho"],
+                cost=p["cost"],
+                generalized_momentum_c=p["mom_c"],
+                optimize_params=optimize_params or ["k", "delta"],
+            )
+            result = paper_trading.run_paper_check(config)
+        except Exception as exc:
+            QMessageBox.warning(self, "Paper check failed", str(exc))
+            return
+
+        state = result["state"]
+        trade = result.get("trade")
+        trade_line = (
+            f"Executed paper {trade.action} for {trade.shares:.6f} shares."
+            if trade is not None
+            else "No paper order was executed."
+        )
+        QMessageBox.information(
+            self,
+            "Paper check complete",
+            (
+                f"{symbol.upper()} {result['action']} at {result['price']:.2f}\n"
+                f"Bar: {result['bar_time']}\n"
+                f"Reason: {result['reason']}\n\n"
+                f"{trade_line}\n"
+                f"Position: {state.position}\n"
+                f"Cash: {state.cash:.2f}\n"
+                f"Shares: {state.shares:.6f}\n"
+                f"Equity: {state.equity:.2f}\n\n"
+                "State saved to data/paper_trading_state.json."
+            ),
+        )
 
     def _choose_real_mode(self):
         items = [

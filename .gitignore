@@ -21,6 +21,7 @@ __pycache__/
 
 # Data/cache
 data/cache/
+data/paper_trading_state.json
 
 # Generated smoke-test reports
 Reports/*smoke*
