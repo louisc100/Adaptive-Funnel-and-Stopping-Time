@@ -88,6 +88,9 @@ REAL_PERIOD_CHOICES = [
     ("1 month", 31, "1h"),
     ("1 week", 7, "15m"),
 ]
+DEFAULT_RANDOM_STOP_SLOPE = 4.0
+DEFAULT_RANDOM_STOP_INTERCEPT = 0.0
+DEFAULT_RANDOM_STOP_SEED = 17
 
 
 def real_period_label(days, interval=None):
@@ -139,6 +142,12 @@ def net_liquidation_multiplier(price_now, price_buy, c_buy=0.0, c_sell=0.0):
     Uses full-wealth investment convention.
     """
     return ((1.0 - c_sell) * price_now) / ((1.0 + c_buy) * price_buy)
+
+
+def sigmoid(x):
+    """Numerically stable logistic map used by randomized stopping."""
+    x = float(np.clip(x, -60.0, 60.0))
+    return 1.0 / (1.0 + np.exp(-x))
 
 
 def max_drawdown(values):
@@ -385,6 +394,10 @@ def run_strategy_on_log_prices(
     generalized_momentum_c=None,
     use_hmm_regime=False,
     hmm_states=3,
+    randomized_stopping=False,
+    random_stop_slope=DEFAULT_RANDOM_STOP_SLOPE,
+    random_stop_intercept=DEFAULT_RANDOM_STOP_INTERCEPT,
+    random_stop_seed=DEFAULT_RANDOM_STOP_SEED,
     mode="Simulation",
     extra=None,
 ):
@@ -423,6 +436,8 @@ def run_strategy_on_log_prices(
     cumulative_var = np.zeros(N)
     cumulative_drift[1:] = np.cumsum(mu_step[1:])
     cumulative_var[1:] = np.cumsum(var_step[1:])
+
+    stop_rng = np.random.default_rng(random_stop_seed) if randomized_stopping else None
 
     realized_w  = np.full(N, 1000.0)
     portfolio_w = np.full(N, 1000.0)
@@ -495,6 +510,34 @@ def run_strategy_on_log_prices(
                 # Phase 1 corrected sell rule:
                 # funnel exit or trailing-profit exit, both above the cost threshold.
                 if funnel_exit or trailing_exit:
+                    exit_reason = "trailing" if trailing_exit else "funnel"
+                    stop_probability = 1.0
+                    stop_draw = np.nan
+                    if randomized_stopping:
+                        strengths = []
+                        if funnel_exit:
+                            strengths.append(float(Z - k))
+                        if trailing_exit:
+                            scale = max(float(trailing_stop), 1e-12)
+                            strengths.append(float((trail_drawdown - trailing_stop) / scale))
+                        exit_strength = max(strengths) if strengths else 0.0
+                        stop_probability = sigmoid(
+                            random_stop_intercept
+                            + random_stop_slope * max(exit_strength, 0.0)
+                        )
+                        stop_draw = float(stop_rng.random())
+                        if stop_draw >= stop_probability:
+                            holding[t] = in_pos
+                            realized_w[t] = wealth
+                            portfolio_w[t] = wealth * net_liquidation_multiplier(
+                                prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                            )
+                            if t >= bh_buy_t:
+                                buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
+                                    prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+                                )
+                            continue
+                        exit_reason = f"randomized-{exit_reason}"
                     net_mult = net_liquidation_multiplier(
                         prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
                     )
@@ -503,7 +546,9 @@ def run_strategy_on_log_prices(
                         "sell_t": t,
                         "gross_log_return": log_ret,
                         "net_multiplier": net_mult,
-                        "exit_reason": "trailing" if trailing_exit else "funnel",
+                        "exit_reason": exit_reason,
+                        "stop_probability": stop_probability,
+                        "stop_draw": stop_draw,
                     })
                     wealth *= net_mult
                     in_pos = False
@@ -585,6 +630,10 @@ def run_strategy_on_log_prices(
         generalized_momentum_c=generalized_momentum_c,
         use_hmm_regime=use_hmm_regime,
         hmm_states=hmm_states,
+        randomized_stopping=randomized_stopping,
+        random_stop_slope=random_stop_slope,
+        random_stop_intercept=random_stop_intercept,
+        random_stop_seed=random_stop_seed,
         **hmm_extra,
         **(extra or {}),
     )
@@ -609,6 +658,10 @@ def run_simulation(
     trailing_stop=0.04,
     trend_entry_z=0.35,
     generalized_momentum_c=None,
+    randomized_stopping=False,
+    random_stop_slope=DEFAULT_RANDOM_STOP_SLOPE,
+    random_stop_intercept=DEFAULT_RANDOM_STOP_INTERCEPT,
+    random_stop_seed=DEFAULT_RANDOM_STOP_SEED,
 ):
     """
     Simulate the adaptive funnel rule.
@@ -641,6 +694,10 @@ def run_simulation(
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
         generalized_momentum_c=generalized_momentum_c,
+        randomized_stopping=randomized_stopping,
+        random_stop_slope=random_stop_slope,
+        random_stop_intercept=random_stop_intercept,
+        random_stop_seed=random_stop_seed,
         mode="Simulation",
         extra={"clip_noise": clip_noise},
     )
@@ -1975,6 +2032,30 @@ class MainWindow(QMainWindow):
                     },
                 },
             )
+        elif extension == "randomized_stopping":
+            sigma_seed = estimate_sigma_seed(self.synthetic_lp)
+            data = run_strategy_on_log_prices(
+                self.synthetic_lp,
+                k=p["k"],
+                delta=int(p["delta"]),
+                sigma_seed=sigma_seed,
+                c_buy=p["cost"],
+                c_sell=p["cost"],
+                drift_process_var=p["drift_q"] * 1e-8,
+                trailing_stop=p["trail_a"],
+                trend_entry_z=p["z_trend"],
+                randomized_stopping=True,
+                mode="Synthetic randomized stopping",
+                extra={
+                    "source": "Same generated path; stochastic eligible exits",
+                    "selected_params": {
+                        "k": p["k"],
+                        "delta": int(p["delta"]),
+                        "random_slope": DEFAULT_RANDOM_STOP_SLOPE,
+                        "random_seed": DEFAULT_RANDOM_STOP_SEED,
+                    },
+                },
+            )
         else:
             QMessageBox.information(
                 self,
@@ -1990,7 +2071,7 @@ class MainWindow(QMainWindow):
         self._set_frame(0)
 
     def _choose_extension(self):
-        items = ["Generalized Momentum", "Regime HMM"]
+        items = ["Generalized Momentum", "Regime HMM", "Randomized Stopping"]
         choice, ok = QInputDialog.getItem(
             self,
             "Choose extension",
@@ -2005,6 +2086,8 @@ class MainWindow(QMainWindow):
             return "generalized_momentum"
         if choice == "Regime HMM":
             return "regime_hmm"
+        if choice == "Randomized Stopping":
+            return "randomized_stopping"
         return None
 
     def _play_learn(self):
@@ -2144,7 +2227,7 @@ class MainWindow(QMainWindow):
                 interval=interval,
             )
             source = f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}"
-            if mode in ("fixed", "generalized_momentum", "regime_hmm"):
+            if mode in ("fixed", "generalized_momentum", "regime_hmm", "randomized_stopping"):
                 sigma_seed = estimate_sigma_seed(full_lp)
                 extra_params = {
                     "k": p["k"],
@@ -2155,6 +2238,7 @@ class MainWindow(QMainWindow):
                 }
                 generalized_c = None
                 use_hmm = False
+                randomized = False
                 mode_label = f"Real {symbol.upper()} fixed sliders"
                 if mode == "generalized_momentum":
                     generalized_c = p["mom_c"]
@@ -2164,6 +2248,11 @@ class MainWindow(QMainWindow):
                     use_hmm = True
                     extra_params["states"] = 3
                     mode_label = f"Real {symbol.upper()} regime HMM"
+                elif mode == "randomized_stopping":
+                    randomized = True
+                    extra_params["random_slope"] = DEFAULT_RANDOM_STOP_SLOPE
+                    extra_params["random_seed"] = DEFAULT_RANDOM_STOP_SEED
+                    mode_label = f"Real {symbol.upper()} randomized stopping"
                 data = run_strategy_on_log_prices(
                     full_lp,
                     k=p["k"],
@@ -2177,6 +2266,7 @@ class MainWindow(QMainWindow):
                     generalized_momentum_c=generalized_c,
                     use_hmm_regime=use_hmm,
                     hmm_states=3,
+                    randomized_stopping=randomized,
                     mode=mode_label,
                     extra={
                         "source": source,
@@ -2217,6 +2307,7 @@ class MainWindow(QMainWindow):
             "Online optimization every 5 bars",
             "Generalized Momentum extension",
             "Regime HMM extension",
+            "Randomized Stopping extension",
         ]
         choice, ok = QInputDialog.getItem(
             self,
@@ -2234,6 +2325,8 @@ class MainWindow(QMainWindow):
             return "generalized_momentum"
         if choice.startswith("Regime"):
             return "regime_hmm"
+        if choice.startswith("Randomized"):
+            return "randomized_stopping"
         return "fixed"
 
     def _choose_real_symbol(self):

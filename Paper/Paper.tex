@@ -401,10 +401,11 @@ In this example, the strategy earned a positive mark-to-market return but underp
 
 \section{Extensions}
 
-The first implemented Layer 3 extensions are generalized momentum and a
-three-state regime HMM filter. Both are available in the GUI for simulated
-paths and real Yahoo Finance data, so they can be compared against the fixed
-baseline and the online optimization mode on the same selected price path.
+The first implemented Layer 3 extensions are generalized momentum, a
+three-state regime HMM filter, and randomized stopping. All three are available
+in the GUI for simulated paths and real Yahoo Finance data, so they can be
+compared against the fixed baseline and the online optimization mode on the
+same selected price path.
 
 \subsection{Generalized Momentum}
 
@@ -466,6 +467,47 @@ with filtered mixture variance
 These filtered inputs replace the Kalman/GARCH inputs inside the diagnostic
 funnel. The GUI also displays the most likely regime and posterior probability
 during playback, making the extension interpretable as the path evolves.
+
+\subsection{Randomized Stopping}
+
+Randomized stopping turns the deterministic sell decision into a probabilistic
+gate. It is applied only after the usual exit eligibility conditions have
+already been satisfied. Let
+\[
+E_t =
+\mathbf 1\{
+Z_{\tau_b,t}>k,\ M_t\leq 0,\ X_t-X_{\tau_b}>h
+\}
+\]
+denote the baseline funnel-exit eligibility event, with the analogous
+trailing-profit eligibility event also allowed in the implementation. When an
+eligible exit occurs, the extension computes a selling probability
+\[
+p_t
+=
+\frac{1}{1+\exp[-(\alpha+\beta A_t)]},
+\qquad \beta>0,
+\]
+where \(A_t\geq 0\) measures how far the active exit signal is beyond its
+threshold. For a funnel exit the implementation uses
+\[
+A_t=Z_{\tau_b,t}-k,
+\]
+and for a trailing-profit exit it uses the normalized excess drawdown beyond
+the trailing threshold. A Bernoulli random variable
+\[
+B_t\sim \mathrm{Bernoulli}(p_t)
+\]
+is then sampled, and the sell is executed only when \(B_t=1\).
+
+This extension does not remove the transaction-cost profit buffer. Therefore,
+any realized voluntary sell that is actually executed still satisfies
+\(X_t-X_{\tau_b}>h\), so the no-realized-loss theorem remains valid for
+completed voluntary exits. The randomization only changes the timing of
+eligible exits; it can delay a sale and therefore can increase or decrease
+mark-to-market risk depending on the path. In the current implementation,
+\(\alpha=0\), \(\beta=4\), and a fixed random seed is used for reproducible GUI
+comparisons on the same path.
 
 Further Layer 3 work may apply the same time-dependence idea to
 \(z_{\mathrm{trend}}\), making trend re-entry stricter or looser depending on
