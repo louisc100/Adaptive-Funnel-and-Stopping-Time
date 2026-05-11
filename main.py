@@ -44,7 +44,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSlider, QLabel, QPushButton, QGridLayout, QGroupBox, QSizePolicy,
     QMessageBox, QInputDialog, QDialog, QListWidget, QListWidgetItem,
-    QDialogButtonBox,
+    QDialogButtonBox, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -1667,7 +1667,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Trading Algorithm — Interactive Phase 6")
-        self.resize(1280, 760)
+        self.resize(1360, 720)
         self._apply_dark_palette()
 
         self.sim_data  = None
@@ -1676,10 +1676,15 @@ class MainWindow(QMainWindow):
         self.current_t = 0
         self.playing   = False
         self.speed_idx = 2
+        self.paper_config = None
+        self.paper_last_result = None
 
         self.timer = QTimer()
         self.timer.setInterval(80)
         self.timer.timeout.connect(self._tick)
+        self.paper_timer = QTimer()
+        self.paper_timer.setInterval(5 * 60 * 1000)
+        self.paper_timer.timeout.connect(self._paper_auto_tick)
 
         # ── central widget ────────────────────────────────────────────────────
         central = QWidget()
@@ -1706,12 +1711,24 @@ class MainWindow(QMainWindow):
 
         # ── right: controls ───────────────────────────────────────────────────
         ctrl_panel = QWidget()
-        ctrl_panel.setMinimumWidth(620)
-        ctrl_panel.setMaximumWidth(760)
+        ctrl_panel.setMinimumWidth(600)
+        ctrl_panel.setMaximumWidth(720)
         ctrl_layout = QVBoxLayout(ctrl_panel)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
         ctrl_layout.setSpacing(4)
-        root.addWidget(ctrl_panel)
+
+        ctrl_scroll = QScrollArea()
+        ctrl_scroll.setWidgetResizable(True)
+        ctrl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        ctrl_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        ctrl_scroll.setFrameShape(QScrollArea.NoFrame)
+        ctrl_scroll.setStyleSheet(
+            f"QScrollArea {{ background: {BG}; border: 0; }}"
+            f"QScrollBar:vertical {{ background: {PANEL_BG}; width: 8px; }}"
+            "QScrollBar::handle:vertical { background: #3a3d52; border-radius: 4px; }"
+        )
+        ctrl_scroll.setWidget(ctrl_panel)
+        root.addWidget(ctrl_scroll)
 
         # Parameters group
         param_box = QGroupBox("Parameters")
@@ -1814,7 +1831,6 @@ class MainWindow(QMainWindow):
         self.btn_ext   = self._btn("Extensions",    self._extensions, enabled=False)
         self.btn_wf    = self._btn("Walk-forward",  self._walk_forward)
         self.btn_real  = self._btn("Real Data",     self._real_data)
-        self.btn_paper = self._btn("Paper Check",   self._paper_check)
         self.btn_play  = self._btn("▶  Play",       self._toggle_play, enabled=False)
         self.btn_reset = self._btn("↺  Reset",      self._reset,       enabled=False)
         self.btn_autoscale = self._btn("Auto-scale ON", self._toggle_autoscale)
@@ -1826,12 +1842,52 @@ class MainWindow(QMainWindow):
         btn_grid.addWidget(self.btn_ext,   1, 1)
         btn_grid.addWidget(self.btn_wf,    2, 0)
         btn_grid.addWidget(self.btn_real,  2, 1)
-        btn_grid.addWidget(self.btn_paper, 3, 0, 1, 2)
-        btn_grid.addWidget(self.btn_play,  4, 0)
-        btn_grid.addWidget(self.btn_reset, 4, 1)
-        btn_grid.addWidget(self.btn_autoscale, 5, 0, 1, 2)
+        btn_grid.addWidget(self.btn_play,  3, 0)
+        btn_grid.addWidget(self.btn_reset, 3, 1)
+        btn_grid.addWidget(self.btn_autoscale, 4, 0, 1, 2)
         play_layout.addLayout(btn_grid)
         ctrl_layout.addWidget(play_box)
+
+        # Paper-trading group
+        paper_box = QGroupBox("Paper trading")
+        paper_box.setStyleSheet(self._group_style())
+        paper_layout = QGridLayout(paper_box)
+        paper_layout.setHorizontalSpacing(8)
+        paper_layout.setVerticalSpacing(2)
+        paper_layout.setContentsMargins(6, 10, 6, 6)
+
+        self.paper_status_labels = {}
+        paper_defs = [
+            ("status", "Status"),
+            ("position", "Position"),
+            ("equity", "Equity"),
+            ("cash", "Cash"),
+            ("shares", "Shares"),
+            ("last", "Last action"),
+        ]
+        for idx, (key, caption) in enumerate(paper_defs):
+            row = idx // 2
+            col = (idx % 2) * 2
+            cap_lbl = QLabel(caption)
+            cap_lbl.setStyleSheet(f"color:{TEXT_C};font-size:10px;")
+            val_lbl = QLabel("—")
+            val_lbl.setStyleSheet("color:white;font-size:11px;font-weight:bold;")
+            val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            paper_layout.addWidget(cap_lbl, row, col)
+            paper_layout.addWidget(val_lbl, row, col + 1)
+            self.paper_status_labels[key] = val_lbl
+
+        self.btn_paper_check = self._btn("Check now", self._paper_check)
+        self.btn_paper_auto = self._btn("Auto OFF", self._toggle_paper_auto)
+        self.btn_paper_auto.setCheckable(True)
+        self.btn_paper_history = self._btn("History", self._show_paper_history)
+        self.btn_paper_reset = self._btn("Reset account", self._reset_paper_state)
+        paper_layout.addWidget(self.btn_paper_check, 3, 0, 1, 2)
+        paper_layout.addWidget(self.btn_paper_auto, 3, 2, 1, 2)
+        paper_layout.addWidget(self.btn_paper_history, 4, 0, 1, 2)
+        paper_layout.addWidget(self.btn_paper_reset, 4, 2, 1, 2)
+        ctrl_layout.addWidget(paper_box)
+        self._update_paper_dashboard()
 
         # Legend
         legend_box = QGroupBox("Legend")
@@ -2363,20 +2419,17 @@ class MainWindow(QMainWindow):
         self.btn_reset.setEnabled(True)
         self._set_frame(0)
 
-    def _paper_check(self):
-        self.timer.stop()
-        self.playing = False
-        self.btn_play.setText("▶  Play")
+    def _build_paper_config_interactive(self):
         symbol = self._choose_real_symbol()
         if symbol is None:
-            return
+            return None
         period = self._choose_real_period()
         if period is None:
-            return
+            return None
         lookback_days, interval = period
         mode = self._choose_real_mode()
         if mode is None:
-            return
+            return None
         optimize_params = None
         if mode == "learn":
             optimize_params = self._choose_play_learn_params(
@@ -2384,34 +2437,48 @@ class MainWindow(QMainWindow):
                 prompt="Choose up to 4 parameters to optimize every 5 bars for the paper check.",
             )
             if optimize_params is None:
-                return
+                return None
         p = {k: sl.value() / scale for k, (sl, scale) in self.sliders.items()}
+
+        import paper_trading
+
+        return paper_trading.StrategyConfig(
+            symbol=symbol,
+            lookback_days=lookback_days,
+            interval=interval,
+            mode=mode,
+            k=p["k"],
+            delta=int(p["delta"]),
+            drift_q=p["drift_q"] * 1e-8,
+            lookback_L=int(p["lookback_L"]),
+            trailing_stop=p["trail_a"],
+            trend_entry_z=p["z_trend"],
+            learning_rate=p["rho"],
+            cost=p["cost"],
+            generalized_momentum_c=p["mom_c"],
+            optimize_params=optimize_params or ["k", "delta"],
+        )
+
+    def _run_paper_check(self, config, show_popup=True):
         try:
             import paper_trading
 
-            config = paper_trading.StrategyConfig(
-                symbol=symbol,
-                lookback_days=lookback_days,
-                interval=interval,
-                mode=mode,
-                k=p["k"],
-                delta=int(p["delta"]),
-                drift_q=p["drift_q"] * 1e-8,
-                lookback_L=int(p["lookback_L"]),
-                trailing_stop=p["trail_a"],
-                trend_entry_z=p["z_trend"],
-                learning_rate=p["rho"],
-                cost=p["cost"],
-                generalized_momentum_c=p["mom_c"],
-                optimize_params=optimize_params or ["k", "delta"],
-            )
             result = paper_trading.run_paper_check(config)
         except Exception as exc:
             QMessageBox.warning(self, "Paper check failed", str(exc))
-            return
+            self.paper_status_labels["status"].setText("Error")
+            self.paper_status_labels["status"].setStyleSheet(
+                f"color:{RED};font-size:11px;font-weight:bold;")
+            return None
 
         state = result["state"]
         trade = result.get("trade")
+        self.paper_config = config
+        self.paper_last_result = result
+        self._update_paper_dashboard(state, result)
+        if not show_popup:
+            return result
+
         trade_line = (
             f"Executed paper {trade.action} for {trade.shares:.6f} shares."
             if trade is not None
@@ -2421,7 +2488,7 @@ class MainWindow(QMainWindow):
             self,
             "Paper check complete",
             (
-                f"{symbol.upper()} {result['action']} at {result['price']:.2f}\n"
+                f"{config.symbol.upper()} {result['action']} at {result['price']:.2f}\n"
                 f"Bar: {result['bar_time']}\n"
                 f"Reason: {result['reason']}\n\n"
                 f"{trade_line}\n"
@@ -2432,6 +2499,124 @@ class MainWindow(QMainWindow):
                 "State saved to data/paper_trading_state.json."
             ),
         )
+        return result
+
+    def _paper_check(self):
+        self.timer.stop()
+        self.playing = False
+        self.btn_play.setText("▶  Play")
+        config = self._build_paper_config_interactive()
+        if config is None:
+            return
+        self._run_paper_check(config, show_popup=True)
+
+    def _paper_auto_tick(self):
+        if self.paper_config is None:
+            self._toggle_paper_auto()
+            return
+        self._run_paper_check(self.paper_config, show_popup=False)
+
+    def _toggle_paper_auto(self):
+        if self.btn_paper_auto.isChecked():
+            if self.paper_config is None:
+                config = self._build_paper_config_interactive()
+                if config is None:
+                    self.btn_paper_auto.setChecked(False)
+                    return
+                self.paper_config = config
+            self.paper_timer.start()
+            self.btn_paper_auto.setText("Auto ON")
+            self._run_paper_check(self.paper_config, show_popup=False)
+        else:
+            self.paper_timer.stop()
+            self.btn_paper_auto.setText("Auto OFF")
+            self._update_paper_dashboard()
+
+    def _update_paper_dashboard(self, state=None, result=None):
+        try:
+            import paper_trading
+
+            if state is None:
+                state = paper_trading.load_state()
+        except Exception:
+            state = None
+
+        if state is None:
+            for lbl in self.paper_status_labels.values():
+                lbl.setText("—")
+            return
+
+        status = "Auto ON" if self.paper_timer.isActive() else "Ready"
+        last_action = "—"
+        if result is not None:
+            last_action = f"{result['action']} @ {result['price']:.2f}"
+        elif state.trades:
+            last_trade = state.trades[-1]
+            last_action = f"{last_trade['action']} @ {last_trade['price']:.2f}"
+        elif state.last_price is not None:
+            last_action = f"HOLD @ {state.last_price:.2f}"
+
+        self.paper_status_labels["status"].setText(status)
+        self.paper_status_labels["position"].setText(state.position)
+        self.paper_status_labels["equity"].setText(f"${state.equity:.2f}")
+        self.paper_status_labels["cash"].setText(f"${state.cash:.2f}")
+        self.paper_status_labels["shares"].setText(f"{state.shares:.4f}")
+        self.paper_status_labels["last"].setText(last_action)
+        self.paper_status_labels["position"].setStyleSheet(
+            f"color:{GREEN if state.position == 'LONG' else TEXT_C};"
+            "font-size:11px;font-weight:bold;")
+        self.paper_status_labels["status"].setStyleSheet(
+            f"color:{GREEN if self.paper_timer.isActive() else TEXT_C};"
+            "font-size:11px;font-weight:bold;")
+
+    def _show_paper_history(self):
+        try:
+            import paper_trading
+
+            state = paper_trading.load_state()
+        except Exception as exc:
+            QMessageBox.warning(self, "Paper history unavailable", str(exc))
+            return
+
+        if not state.trades:
+            QMessageBox.information(
+                self,
+                "Paper trade history",
+                "No paper trades have been recorded yet.",
+            )
+            return
+
+        lines = []
+        for trade in state.trades[-20:]:
+            lines.append(
+                f"{trade['time']} | {trade['symbol']} | {trade['action']} "
+                f"{trade['shares']:.6f} @ {trade['price']:.2f} | "
+                f"{trade['position_after']} | cash {trade['cash_after']:.2f}"
+            )
+        QMessageBox.information(
+            self,
+            "Paper trade history",
+            "\n".join(lines),
+        )
+
+    def _reset_paper_state(self):
+        reply = QMessageBox.question(
+            self,
+            "Reset paper account",
+            "Reset the paper account to $10,000 cash and no position?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            import paper_trading
+
+            paper_trading.save_state(paper_trading.PaperState())
+            self.paper_last_result = None
+            self._update_paper_dashboard()
+        except Exception as exc:
+            QMessageBox.warning(self, "Paper reset failed", str(exc))
 
     def _choose_real_mode(self):
         items = [
