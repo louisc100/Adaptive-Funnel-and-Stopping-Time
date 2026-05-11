@@ -2144,8 +2144,26 @@ class MainWindow(QMainWindow):
                 interval=interval,
             )
             source = f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}"
-            if mode == "fixed":
+            if mode in ("fixed", "generalized_momentum", "regime_hmm"):
                 sigma_seed = estimate_sigma_seed(full_lp)
+                extra_params = {
+                    "k": p["k"],
+                    "delta": int(p["delta"]),
+                    "q": p["drift_q"] * 1e-8,
+                    "a": p["trail_a"],
+                    "z_trend": p["z_trend"],
+                }
+                generalized_c = None
+                use_hmm = False
+                mode_label = f"Real {symbol.upper()} fixed sliders"
+                if mode == "generalized_momentum":
+                    generalized_c = p["mom_c"]
+                    extra_params["mom_c"] = p["mom_c"]
+                    mode_label = f"Real {symbol.upper()} generalized momentum"
+                elif mode == "regime_hmm":
+                    use_hmm = True
+                    extra_params["states"] = 3
+                    mode_label = f"Real {symbol.upper()} regime HMM"
                 data = run_strategy_on_log_prices(
                     full_lp,
                     k=p["k"],
@@ -2156,16 +2174,13 @@ class MainWindow(QMainWindow):
                     drift_process_var=p["drift_q"] * 1e-8,
                     trailing_stop=p["trail_a"],
                     trend_entry_z=p["z_trend"],
-                    mode=f"Real {symbol.upper()} fixed sliders",
+                    generalized_momentum_c=generalized_c,
+                    use_hmm_regime=use_hmm,
+                    hmm_states=3,
+                    mode=mode_label,
                     extra={
                         "source": source,
-                        "selected_params": {
-                            "k": p["k"],
-                            "delta": int(p["delta"]),
-                            "q": p["drift_q"] * 1e-8,
-                            "a": p["trail_a"],
-                            "z_trend": p["z_trend"],
-                        },
+                        "selected_params": extra_params,
                     },
                 )
             else:
@@ -2200,6 +2215,8 @@ class MainWindow(QMainWindow):
         items = [
             "Fixed slider values",
             "Online optimization every 5 bars",
+            "Generalized Momentum extension",
+            "Regime HMM extension",
         ]
         choice, ok = QInputDialog.getItem(
             self,
@@ -2211,7 +2228,13 @@ class MainWindow(QMainWindow):
         )
         if not ok:
             return None
-        return "learn" if choice.startswith("Online") else "fixed"
+        if choice.startswith("Online"):
+            return "learn"
+        if choice.startswith("Generalized"):
+            return "generalized_momentum"
+        if choice.startswith("Regime"):
+            return "regime_hmm"
+        return "fixed"
 
     def _choose_real_symbol(self):
         items = [f"{symbol} - {name}" for symbol, name in REAL_DATA_CHOICES]
