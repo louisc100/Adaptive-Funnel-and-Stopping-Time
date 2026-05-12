@@ -2,9 +2,9 @@
 Paper-trading layer for the funnel trading project.
 
 This module does not place live broker orders. It fetches recent Yahoo bars,
-runs the existing strategy engine, converts the latest strategy state into a
-paper BUY/SELL/HOLD decision, fake-fills at the latest bar price, and persists
-the account state to JSON.
+runs the existing strategy engine, processes every new bar since the last paper
+check, fake-fills any paper BUY/SELL transitions, and persists the account
+state to JSON.
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ class PaperTrade:
 
 @dataclass
 class PaperState:
+    symbol: str | None = None
     cash: float = 10000.0
     shares: float = 0.0
     position: str = "CASH"
@@ -184,20 +185,25 @@ def run_configured_strategy(log_prices: np.ndarray, config: StrategyConfig) -> d
     )
 
 
-def latest_decision(data: dict, current_position: str) -> tuple[str, str]:
+def decision_at_bar(data: dict, index: int, current_position: str) -> tuple[str, str]:
     """
-    Convert latest strategy exposure into a paper action.
+    Convert strategy exposure at one bar into a paper action.
 
     On the first run, this intentionally aligns the paper account with the
     strategy's current target exposure, even if the original backtest entry
     happened before the latest bar.
     """
-    desired_long = bool(data["holding"][-1])
+    desired_long = bool(data["holding"][index])
     if desired_long and current_position != "LONG":
         return "BUY", "strategy target exposure is LONG"
     if not desired_long and current_position == "LONG":
         return "SELL", "strategy target exposure is CASH"
     return "HOLD", "paper account already matches strategy exposure"
+
+
+def latest_decision(data: dict, current_position: str) -> tuple[str, str]:
+    """Backward-compatible latest-bar decision helper."""
+    return decision_at_bar(data, -1, current_position)
 
 
 def apply_paper_action(
@@ -233,6 +239,7 @@ def apply_paper_action(
         position_after=state.position,
         reason=reason,
     )
+    state.symbol = config.symbol.upper()
     state.trades.append(asdict(trade))
     return trade
 
@@ -241,8 +248,17 @@ def run_paper_check(
     config: StrategyConfig,
     state_path: Path = DEFAULT_STATE_PATH,
 ) -> dict:
-    """Fetch latest bars, run strategy, update paper state once, and save it."""
+    """Fetch latest bars, process all new bars in order, and save state."""
     state = load_state(state_path)
+    symbol = config.symbol.upper()
+    if state.symbol and state.symbol != symbol and state.position == "LONG":
+        raise ValueError(
+            "Paper account is currently LONG "
+            f"{state.symbol}. Reset or close the paper account before switching to {symbol}."
+        )
+    if state.symbol is None or state.position == "CASH":
+        state.symbol = symbol
+
     timestamps, prices = fetch_yahoo_bars(
         config.symbol,
         config.lookback_days,
@@ -262,24 +278,71 @@ def run_paper_check(
             "price": latest_price,
             "state": state,
             "trade": None,
+            "trades": [],
+            "trade_indices": [],
+            "paper_buy_times": set(),
+            "paper_sell_times": set(),
+            "processed_bars": 0,
         }
 
     data = run_configured_strategy(np.log(prices), config)
-    action, reason = latest_decision(data, state.position)
+    iso_times = [epoch_to_iso(int(ts)) for ts in timestamps]
+    if state.last_bar_time is None:
+        new_indices = [len(prices) - 1]
+    else:
+        new_indices = [
+            idx for idx, iso_time in enumerate(iso_times)
+            if iso_time > state.last_bar_time
+        ]
+        if not new_indices:
+            new_indices = [len(prices) - 1]
 
-    state.last_bar_time = bar_time
-    state.last_price = latest_price
+    last_action = "HOLD"
+    last_reason = "no new strategy transition"
+    trades = []
+    trade_indices = []
+    for idx in new_indices:
+        step_time = iso_times[idx]
+        step_price = float(prices[idx])
+        action, reason = decision_at_bar(data, idx, state.position)
+        state.last_bar_time = step_time
+        state.last_price = step_price
+        if action in ("BUY", "SELL"):
+            trade = apply_paper_action(state, config, action, step_price, step_time, reason)
+            if trade is not None:
+                trades.append(trade)
+                trade_indices.append(idx)
+        last_action = action
+        last_reason = reason
+
+    latest_price = float(prices[new_indices[-1]])
+    bar_time = iso_times[new_indices[-1]]
     state.updated_at = utc_now_iso()
-    trade = apply_paper_action(state, config, action, latest_price, bar_time, reason)
     save_state(state, state_path)
+    paper_buy_times = set()
+    paper_sell_times = set()
+    time_to_index = {iso_time: idx for idx, iso_time in enumerate(iso_times)}
+    for trade_record in state.trades:
+        idx = time_to_index.get(trade_record.get("time"))
+        if idx is None:
+            continue
+        if trade_record.get("action") == "BUY":
+            paper_buy_times.add(idx)
+        elif trade_record.get("action") == "SELL":
+            paper_sell_times.add(idx)
 
     return {
-        "action": action,
-        "reason": reason,
+        "action": last_action,
+        "reason": last_reason,
         "bar_time": bar_time,
         "price": latest_price,
         "state": state,
-        "trade": trade,
+        "trade": trades[-1] if trades else None,
+        "trades": trades,
+        "trade_indices": trade_indices,
+        "paper_buy_times": paper_buy_times,
+        "paper_sell_times": paper_sell_times,
+        "processed_bars": len(new_indices),
         "strategy": data,
     }
 
