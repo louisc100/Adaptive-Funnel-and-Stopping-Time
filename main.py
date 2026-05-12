@@ -79,7 +79,20 @@ REAL_DATA_CHOICES = [
     ("AMZN", "Amazon"),
     ("GOOGL", "Alphabet"),
     ("META", "Meta"),
+    ("FX pair...", "Major foreign exchange pairs"),
     ("Custom ticker...", "Type another Yahoo symbol"),
+]
+FX_DATA_CHOICES = [
+    ("EURUSD=X", "EUR/USD"),
+    ("GBPUSD=X", "GBP/USD"),
+    ("USDJPY=X", "USD/JPY"),
+    ("USDCHF=X", "USD/CHF"),
+    ("AUDUSD=X", "AUD/USD"),
+    ("USDCAD=X", "USD/CAD"),
+    ("NZDUSD=X", "NZD/USD"),
+    ("EURJPY=X", "EUR/JPY"),
+    ("GBPJPY=X", "GBP/JPY"),
+    ("Custom FX pair...", "Type a Yahoo FX symbol"),
 ]
 REAL_PERIOD_CHOICES = [
     ("5 years", 5 * 365.25, "1d"),
@@ -110,8 +123,22 @@ def real_period_label(days, interval=None):
     return f"{label}, {interval} bars" if interval else label
 
 
-def periods_per_year_for_interval(interval):
-    """Approximate U.S. equity bar count per year for annualized metrics."""
+def is_fx_symbol(symbol):
+    """Return True for Yahoo Finance's common FX ticker convention."""
+    return str(symbol).upper().endswith("=X")
+
+
+def periods_per_year_for_interval(interval, asset_class="equity"):
+    """Approximate bar count per year for annualized metrics."""
+    if asset_class == "fx":
+        return {
+            "1d": 252,
+            "1wk": 52,
+            "1h": 252 * 24,
+            "30m": 252 * 48,
+            "15m": 252 * 96,
+            "5m": 252 * 288,
+        }.get(interval, 252)
     return {
         "1d": 252,
         "1wk": 52,
@@ -120,6 +147,14 @@ def periods_per_year_for_interval(interval):
         "15m": 252 * 26,
         "5m": 252 * 78,
     }.get(interval, 252)
+
+
+def periods_per_year_for_symbol(symbol, interval):
+    """Choose annualization by asset type."""
+    return periods_per_year_for_interval(
+        interval,
+        asset_class="fx" if is_fx_symbol(symbol) else "equity",
+    )
 
 
 # ── Phase 1 utilities ─────────────────────────────────────────────────────────
@@ -1533,7 +1568,7 @@ def run_real_price_walk_forward(
     data["symbol"] = symbol.upper()
     data["lookback_days"] = lookback_days
     data["interval"] = interval
-    data["periods_per_year"] = periods_per_year_for_interval(interval)
+    data["periods_per_year"] = periods_per_year_for_symbol(symbol, interval)
     data["mode"] = f"Real {symbol.upper()} online adaptive"
     return data
 
@@ -2277,7 +2312,8 @@ class MainWindow(QMainWindow):
                 days=lookback_days,
                 interval=interval,
             )
-            source = f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}"
+            source_prefix = "Yahoo FX" if is_fx_symbol(symbol) else "Yahoo adjusted"
+            source = f"{source_prefix} {symbol.upper()}, {real_period_label(lookback_days, interval)}"
             if mode in ("fixed", "generalized_momentum", "regime_hmm", "randomized_stopping"):
                 sigma_seed = estimate_sigma_seed(full_lp)
                 extra_params = {
@@ -2351,7 +2387,7 @@ class MainWindow(QMainWindow):
             data["symbol"] = symbol.upper()
             data["lookback_days"] = lookback_days
             data["interval"] = interval
-            data["periods_per_year"] = periods_per_year_for_interval(interval)
+            data["periods_per_year"] = periods_per_year_for_symbol(symbol, interval)
         except Exception as exc:
             QMessageBox.warning(self, "Real data fetch failed", str(exc))
             return
@@ -2409,6 +2445,8 @@ class MainWindow(QMainWindow):
             return None
 
         symbol = choice.split(" - ", 1)[0].strip().upper()
+        if symbol == "FX PAIR...":
+            return self._choose_fx_symbol()
         if symbol != "CUSTOM TICKER...":
             return symbol
 
@@ -2423,6 +2461,38 @@ class MainWindow(QMainWindow):
         if not custom:
             QMessageBox.warning(self, "Missing ticker", "Please enter a ticker symbol.")
             return None
+        return custom
+
+    def _choose_fx_symbol(self):
+        items = [f"{symbol} - {name}" for symbol, name in FX_DATA_CHOICES]
+        choice, ok = QInputDialog.getItem(
+            self,
+            "Choose FX pair",
+            "Select a Yahoo Finance FX pair:",
+            items,
+            0,
+            False,
+        )
+        if not ok:
+            return None
+
+        symbol = choice.split(" - ", 1)[0].strip().upper()
+        if symbol != "CUSTOM FX PAIR...":
+            return symbol
+
+        custom, ok = QInputDialog.getText(
+            self,
+            "Custom FX pair",
+            "Enter a Yahoo FX ticker, e.g. EURUSD=X, USDJPY=X:",
+        )
+        if not ok:
+            return None
+        custom = custom.strip().upper()
+        if not custom:
+            QMessageBox.warning(self, "Missing FX pair", "Please enter a Yahoo FX ticker.")
+            return None
+        if not custom.endswith("=X"):
+            custom += "=X"
         return custom
 
     def _choose_real_period(self):
