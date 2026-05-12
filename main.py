@@ -44,7 +44,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSlider, QLabel, QPushButton, QGridLayout, QGroupBox, QSizePolicy,
     QMessageBox, QInputDialog, QDialog, QListWidget, QListWidgetItem,
-    QDialogButtonBox, QScrollArea,
+    QDialogButtonBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -1667,7 +1667,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Trading Algorithm — Interactive Phase 6")
-        self.resize(1360, 720)
+        self.resize(1440, 780)
         self._apply_dark_palette()
 
         self.sim_data  = None
@@ -1706,24 +1706,12 @@ class MainWindow(QMainWindow):
 
         # ── right: controls ───────────────────────────────────────────────────
         ctrl_panel = QWidget()
-        ctrl_panel.setMinimumWidth(600)
-        ctrl_panel.setMaximumWidth(720)
+        ctrl_panel.setMinimumWidth(680)
+        ctrl_panel.setMaximumWidth(760)
         ctrl_layout = QVBoxLayout(ctrl_panel)
         ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(4)
-
-        ctrl_scroll = QScrollArea()
-        ctrl_scroll.setWidgetResizable(True)
-        ctrl_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        ctrl_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        ctrl_scroll.setFrameShape(QScrollArea.NoFrame)
-        ctrl_scroll.setStyleSheet(
-            f"QScrollArea {{ background: {BG}; border: 0; }}"
-            f"QScrollBar:vertical {{ background: {PANEL_BG}; width: 8px; }}"
-            "QScrollBar::handle:vertical { background: #3a3d52; border-radius: 4px; }"
-        )
-        ctrl_scroll.setWidget(ctrl_panel)
-        root.addWidget(ctrl_scroll)
+        ctrl_layout.setSpacing(3)
+        root.addWidget(ctrl_panel)
 
         # Parameters group
         param_box = QGroupBox("Parameters")
@@ -1873,9 +1861,9 @@ class MainWindow(QMainWindow):
         stats_box = QGroupBox("Live stats")
         stats_box.setStyleSheet(self._group_style())
         stats_layout = QGridLayout(stats_box)
-        stats_layout.setHorizontalSpacing(8)
-        stats_layout.setVerticalSpacing(2)
-        stats_layout.setContentsMargins(6, 10, 6, 6)
+        stats_layout.setHorizontalSpacing(6)
+        stats_layout.setVerticalSpacing(1)
+        stats_layout.setContentsMargins(6, 8, 6, 4)
 
         self.stat_labels = {}
         stat_defs = [
@@ -1904,20 +1892,21 @@ class MainWindow(QMainWindow):
             ("h",        "h"),
         ]
         for idx, (key, caption) in enumerate(stat_defs):
-            row = idx // 2
-            col = (idx % 2) * 2
+            row = idx // 3
+            col = (idx % 3) * 2
             cap_lbl = QLabel(caption)
             cap_lbl.setStyleSheet(f"color:{TEXT_C};font-size:10px;")
             val_lbl = QLabel("—")
             val_lbl.setStyleSheet(
-                "color:white;font-size:11px;font-weight:bold;")
+                "color:white;font-size:10px;font-weight:bold;")
             val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            val_lbl.setMinimumWidth(68)
+            val_lbl.setMinimumWidth(58)
             stats_layout.addWidget(cap_lbl, row, col)
             stats_layout.addWidget(val_lbl, row, col + 1)
             self.stat_labels[key] = val_lbl
         stats_layout.setColumnStretch(1, 1)
         stats_layout.setColumnStretch(3, 1)
+        stats_layout.setColumnStretch(5, 1)
 
         ctrl_layout.addWidget(stats_box)
         ctrl_layout.addStretch()
@@ -2615,9 +2604,9 @@ class MainWindow(QMainWindow):
     def _group_style(self):
         return f"""
             QGroupBox {{
-                color: {TEXT_C}; font-size: 12px; font-weight: bold;
+                color: {TEXT_C}; font-size: 11px; font-weight: bold;
                 border: 0.5px solid #333344; border-radius: 6px;
-                margin-top: 8px; padding: 6px;
+                margin-top: 6px; padding: 4px;
             }}
             QGroupBox::title {{
                 subcontrol-origin: margin; left: 8px; padding: 0 4px;
@@ -2644,7 +2633,7 @@ class MainWindow(QMainWindow):
             QPushButton {{
                 background: #262736; color: {TEXT_C};
                 border: 0.5px solid #333344; border-radius: 5px;
-                padding: 6px 10px; font-size: 12px;
+                padding: 4px 8px; font-size: 11px;
             }}
             QPushButton:hover {{ background: #2e3148; }}
             QPushButton:pressed {{ background: #185FA5; color: white; }}
