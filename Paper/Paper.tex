@@ -15,7 +15,7 @@
 \maketitle
 
 \begin{abstract}
-This paper formulates a discrete-time, long-only trading rule based on a drift-adjusted predictive funnel for log prices. The strategy enters and exits positions using standardized price deviations, local momentum, adaptive drift and volatility estimates, and an explicit transaction-cost profit threshold. The main formal property is a no-realized-loss guarantee for completed voluntary exits: whenever the algorithm sells under its own exit rule, the sale price is high enough to cover proportional buy and sell costs. This guarantee is deliberately narrow. It does not remove mark-to-market drawdown, opportunity cost, indefinite holding risk, model error, or finite-horizon liquidation risk. The implementation also includes practical modifications used in the simulation: bounded diagnostic funnels, trailing-profit exits, trend-continuation re-entry, walk-forward parameter selection, online parameter smoothing, and real market bar data with horizon-dependent sampling intervals.
+This paper formulates a discrete-time, long-only trading rule based on a drift-adjusted predictive funnel for log prices. The strategy enters and exits positions using standardized price deviations, local momentum, adaptive drift and volatility estimates, and an explicit transaction-cost profit threshold. The main formal property is a no-realized-loss guarantee for completed voluntary exits: whenever the algorithm sells under its own exit rule, the executable sale price is high enough to cover proportional buy and sell costs. This guarantee is deliberately narrow. It does not remove mark-to-market drawdown, opportunity cost, indefinite holding risk, model error, taxes, exact exchange microstructure, or finite-horizon liquidation risk. The implementation also includes practical modifications used in the simulation: bounded diagnostic funnels, trailing-profit exits, trend-continuation re-entry, spread/slippage-aware execution approximations, walk-forward parameter selection, online parameter smoothing, and real market bar data with horizon-dependent sampling intervals.
 \end{abstract}
 
 \section{Motivation}
@@ -97,6 +97,37 @@ h=
 \]
 The quantity \(h\) is the minimum log return required to break even after costs.
 
+\section{Signal Price and Executable Price}
+
+The funnel, drift estimate, volatility estimate, and momentum statistic are built from the observed bar price. In simulation this is the simulated price; for Yahoo data it is the bar close or adjusted close. This price is denoted
+\[
+S_t^{\mathrm{sig}},
+\qquad
+X_t=\log S_t^{\mathrm{sig}},
+\]
+and should be interpreted as a signal price rather than a guaranteed transaction price.
+
+In a live market, buying is executed near the ask and selling is executed near the bid. Since the Yahoo historical bars used in the app do not provide a complete historical order book, the implementation adds a conservative execution layer. With total spread proxy \(s\geq 0\) and per-side slippage proxy \(\ell\geq 0\), the executable prices are approximated by
+\[
+S_t^{\mathrm{buy}}
+=
+S_t^{\mathrm{sig}}\left(1+\frac{s}{2}+\ell\right),
+\qquad
+S_t^{\mathrm{sell}}
+=
+S_t^{\mathrm{sig}}\left(1-\frac{s}{2}-\ell\right).
+\]
+Thus the algorithm may learn and generate signals from \(X_t\), but entries are charged at \(S_t^{\mathrm{buy}}\), exits are liquidated at \(S_t^{\mathrm{sell}}\), and mark-to-market wealth is also reported using the sell-side executable price. In the GUI, \(s\) and \(\ell\) are controlled by the spread and slippage sliders in basis points. Setting both to zero recovers the earlier close-price backtest.
+
+Under this execution convention, the profit-buffer condition is evaluated as
+\[
+\log S_t^{\mathrm{sell}}
+-
+\log S_{\tau_b}^{\mathrm{buy}}
+>h.
+\]
+This is stricter than comparing close prices alone: a trade must overcome the modeled bid-ask spread, slippage, and the explicit proportional transaction costs before a voluntary sale is allowed.
+
 \section{Trading Rule}
 
 The strategy is long-only. In the visualization, the simulation starts with an initial position at the first tradable observation so that the exit logic can be seen immediately. After a sale, the rule alternates between cash and long exposure.
@@ -109,10 +140,11 @@ Let \(\tau_b\) be the current entry time. The mathematical upper-funnel exit rul
 =
 \inf\left\{
 t>\tau_b+\delta:
-Z_{\tau_b,t}>k,\quad M_t\leq 0,\quad X_t-X_{\tau_b}>h
+Z_{\tau_b,t}>k,\quad M_t\leq 0,\quad
+\log S_t^{\mathrm{sell}}-\log S_{\tau_b}^{\mathrm{buy}}>h
 \right\}.
 \]
-The first condition says price is high relative to the predictive funnel; the second says recent upward momentum has weakened; the third ensures the trade is profitable after transaction costs.
+The first condition says price is high relative to the predictive funnel; the second says recent upward momentum has weakened; the third ensures the trade is profitable after modeled execution costs and transaction costs.
 
 The Extensions section describes an optional generalized momentum variant that modifies only the second condition while leaving the funnel and profit-buffer conditions unchanged.
 
@@ -141,7 +173,7 @@ be the highest log price since entry. For a trailing threshold \(a>0\), a traili
 \[
 H_t-X_t\geq a
 \qquad\text{and}\qquad
-X_t-X_{\tau_b}>h.
+\log S_t^{\mathrm{sell}}-\log S_{\tau_b}^{\mathrm{buy}}>h.
 \]
 The default implementation uses \(a=0.04\) in log-price units. Since the profit condition is retained, this practical exit does not weaken the no-realized-loss theorem.
 
@@ -171,25 +203,29 @@ The default value is \(z_{\mathrm{trend}}=0.35\), intentionally smaller than \(k
 \begin{theorem}[Transaction-cost-safe voluntary exit]
 Suppose a position is entered at \(\tau_b\) and voluntarily exited at a finite time \(\tau_s\) by either the funnel exit or the trailing-profit exit. If the exit rule includes the condition
 \[
-X_{\tau_s}-X_{\tau_b}>h,
+\log S_{\tau_s}^{\mathrm{sell}}
+-
+\log S_{\tau_b}^{\mathrm{buy}}>h,
 \]
 then the after-cost realized multiplier satisfies
 \[
-\frac{(1-c_{\mathrm{sell}})S_{\tau_s}}
-{(1+c_{\mathrm{buy}})S_{\tau_b}}>1.
+\frac{(1-c_{\mathrm{sell}})S_{\tau_s}^{\mathrm{sell}}}
+{(1+c_{\mathrm{buy}})S_{\tau_b}^{\mathrm{buy}}}>1.
 \]
 \end{theorem}
 
 \begin{proof}
 By definition of \(h\),
 \[
-X_{\tau_s}-X_{\tau_b}
+\log S_{\tau_s}^{\mathrm{sell}}
+-
+\log S_{\tau_b}^{\mathrm{buy}}
 >
 \log\left(\frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}\right).
 \]
 Exponentiating gives
 \[
-\frac{S_{\tau_s}}{S_{\tau_b}}
+\frac{S_{\tau_s}^{\mathrm{sell}}}{S_{\tau_b}^{\mathrm{buy}}}
 >
 \frac{1+c_{\mathrm{buy}}}{1-c_{\mathrm{sell}}}.
 \]
@@ -197,7 +233,7 @@ Multiplying by \((1-c_{\mathrm{sell}})/(1+c_{\mathrm{buy}})\) proves the claim.
 \end{proof}
 
 \begin{remark}
-The theorem only applies to completed voluntary exits. It does not apply to forced liquidation at a finite horizon, margin liquidation, inability to execute, taxes, bid-ask slippage beyond the modeled cost, or a position that remains open indefinitely.
+The theorem only applies to completed voluntary exits. It does not apply to forced liquidation at a finite horizon, margin liquidation, inability to execute, taxes, slippage beyond the modeled execution proxy, or a position that remains open indefinitely.
 \end{remark}
 
 \section{Wealth and Performance Diagnostics}
@@ -207,16 +243,16 @@ Let \(W_t^r\) denote realized wealth, updated only after completed exits. While 
 W_t^m
 =
 W_{\tau_b}^r
-\frac{(1-c_{\mathrm{sell}})S_t}
-{(1+c_{\mathrm{buy}})S_{\tau_b}}.
+\frac{(1-c_{\mathrm{sell}})S_t^{\mathrm{sell}}}
+{(1+c_{\mathrm{buy}})S_{\tau_b}^{\mathrm{buy}}}.
 \]
 The buy-and-hold benchmark is computed from the same initial exposure convention:
 \[
 W_t^{\mathrm{bh}}
 =
 W_0
-\frac{(1-c_{\mathrm{sell}})S_t}
-{(1+c_{\mathrm{buy}})S_{\tau_0}}.
+\frac{(1-c_{\mathrm{sell}})S_t^{\mathrm{sell}}}
+{(1+c_{\mathrm{buy}})S_{\tau_0}^{\mathrm{buy}}}.
 \]
 
 Let
@@ -524,7 +560,7 @@ The strategy is not risk-free. The main limitations are:
     \item \textbf{Forced-exit risk:} liquidation outside the voluntary exit rule can realize losses.
     \item \textbf{Opportunity cost:} the strategy may underperform buy-and-hold, especially in persistent trends or if re-entry is too conservative.
     \item \textbf{Estimation error:} drift is difficult to estimate, and volatility models are misspecified in real markets.
-    \item \textbf{Data and execution risk:} public chart data may contain gaps or limits, and the model does not fully include spreads, taxes, market impact, or order execution.
+    \item \textbf{Data and execution risk:} public chart data may contain gaps or limits. The implementation includes only a simple spread/slippage proxy, not full order-book dynamics, taxes, market impact, latency, or guaranteed execution.
     \item \textbf{Parameter sensitivity:} \(k\), \(\delta\), \(q\), \(L\), \(a\), and \(z_{\mathrm{trend}}\) affect both returns and risk.
 \end{itemize}
 

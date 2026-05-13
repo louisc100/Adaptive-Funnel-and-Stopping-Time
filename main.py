@@ -179,6 +179,21 @@ def net_liquidation_multiplier(price_now, price_buy, c_buy=0.0, c_sell=0.0):
     return ((1.0 - c_sell) * price_now) / ((1.0 + c_buy) * price_buy)
 
 
+def execution_prices(signal_prices, spread=0.0, slippage=0.0):
+    """
+    Convert signal prices into conservative executable buy/sell prices.
+
+    The signal price is treated as close/mid. Buying pays an ask-like premium;
+    selling receives a bid-like discount.
+    """
+    signal_prices = np.asarray(signal_prices, dtype=float)
+    half_spread = max(float(spread), 0.0) / 2.0
+    slip = max(float(slippage), 0.0)
+    buy_mult = 1.0 + half_spread + slip
+    sell_mult = max(1.0 - half_spread - slip, 1e-12)
+    return signal_prices * buy_mult, signal_prices * sell_mult
+
+
 def sigmoid(x):
     """Numerically stable logistic map used by randomized stopping."""
     x = float(np.clip(x, -60.0, 60.0))
@@ -433,6 +448,8 @@ def run_strategy_on_log_prices(
     random_stop_slope=DEFAULT_RANDOM_STOP_SLOPE,
     random_stop_intercept=DEFAULT_RANDOM_STOP_INTERCEPT,
     random_stop_seed=DEFAULT_RANDOM_STOP_SEED,
+    execution_spread=0.0,
+    execution_slippage=0.0,
     mode="Simulation",
     extra=None,
 ):
@@ -441,6 +458,11 @@ def run_strategy_on_log_prices(
     if lp.size < 2:
         raise ValueError("A price path must contain at least two observations.")
     prices = np.exp(lp)
+    buy_exec_prices, sell_exec_prices = execution_prices(
+        prices,
+        spread=execution_spread,
+        slippage=execution_slippage,
+    )
     log_returns = np.diff(lp)
 
     n_steps = lp.size - 1
@@ -492,13 +514,13 @@ def run_strategy_on_log_prices(
     in_pos = True
     buy_t  = 1
     buy_lp = lp[1]
-    buy_price = prices[1]
+    buy_price = buy_exec_prices[1]
     peak_lp = buy_lp
     buy_times.append(1)
 
     # Buy-and-hold benchmark starts from the same initial buy time.
     bh_buy_t = 1
-    bh_buy_price = prices[bh_buy_t]
+    bh_buy_price = buy_exec_prices[bh_buy_t]
 
     for t in range(1, N):
         M = lp[t] - lp[t - delta] if t >= delta else np.nan
@@ -524,6 +546,7 @@ def run_strategy_on_log_prices(
                 Z = (lp[t] - ref_lp - drift_since_ref) / denom if denom > 0 else np.nan
                 Zsig[t] = Z
                 log_ret = lp[t] - buy_lp
+                exec_log_ret = np.log(sell_exec_prices[t]) - np.log(buy_price)
                 trail_drawdown = peak_lp - lp[t]
                 momentum_threshold = 0.0
                 if generalized_momentum_c is not None and el > 0:
@@ -534,11 +557,11 @@ def run_strategy_on_log_prices(
                     and Z > k
                     and not np.isnan(M)
                     and M <= momentum_threshold
-                    and log_ret > h
+                    and exec_log_ret > h
                 )
                 trailing_exit = (
                     trailing_stop is not None
-                    and log_ret > h
+                    and exec_log_ret > h
                     and trail_drawdown >= trailing_stop
                 )
 
@@ -565,21 +588,25 @@ def run_strategy_on_log_prices(
                             holding[t] = in_pos
                             realized_w[t] = wealth
                             portfolio_w[t] = wealth * net_liquidation_multiplier(
-                                prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                                sell_exec_prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
                             )
                             if t >= bh_buy_t:
                                 buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
-                                    prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+                                    sell_exec_prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
                                 )
                             continue
                         exit_reason = f"randomized-{exit_reason}"
                     net_mult = net_liquidation_multiplier(
-                        prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                        sell_exec_prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
                     )
                     trade_log.append({
                         "buy_t": buy_t,
                         "sell_t": t,
                         "gross_log_return": log_ret,
+                        "exec_log_return": exec_log_ret,
+                        "buy_exec_price": buy_price,
+                        "signal_price": prices[t],
+                        "sell_exec_price": sell_exec_prices[t],
                         "net_multiplier": net_mult,
                         "exit_reason": exit_reason,
                         "stop_probability": stop_probability,
@@ -611,7 +638,7 @@ def run_strategy_on_log_prices(
                         in_pos = True
                         buy_t  = t
                         buy_lp = lp[t]
-                        buy_price = prices[t]
+                        buy_price = buy_exec_prices[t]
                         peak_lp = buy_lp
                         buy_times.append(t)
 
@@ -622,7 +649,7 @@ def run_strategy_on_log_prices(
         # Mark-to-market wealth is interpreted as after-cost liquidation value.
         if in_pos and buy_t is not None:
             portfolio_w[t] = wealth * net_liquidation_multiplier(
-                prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                sell_exec_prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
             )
         else:
             portfolio_w[t] = wealth
@@ -630,7 +657,7 @@ def run_strategy_on_log_prices(
         # Buy-and-hold benchmark, also shown as after-cost liquidation value.
         if t >= bh_buy_t:
             buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
-                prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+                sell_exec_prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
             )
 
     hmm_extra = {}
@@ -669,6 +696,8 @@ def run_strategy_on_log_prices(
         random_stop_slope=random_stop_slope,
         random_stop_intercept=random_stop_intercept,
         random_stop_seed=random_stop_seed,
+        execution_spread=execution_spread,
+        execution_slippage=execution_slippage,
         **hmm_extra,
         **(extra or {}),
     )
@@ -697,6 +726,8 @@ def run_simulation(
     random_stop_slope=DEFAULT_RANDOM_STOP_SLOPE,
     random_stop_intercept=DEFAULT_RANDOM_STOP_INTERCEPT,
     random_stop_seed=DEFAULT_RANDOM_STOP_SEED,
+    execution_spread=0.0,
+    execution_slippage=0.0,
 ):
     """
     Simulate the adaptive funnel rule.
@@ -733,6 +764,8 @@ def run_simulation(
         random_stop_slope=random_stop_slope,
         random_stop_intercept=random_stop_intercept,
         random_stop_seed=random_stop_seed,
+        execution_spread=execution_spread,
+        execution_slippage=execution_slippage,
         mode="Simulation",
         extra={"clip_noise": clip_noise},
     )
@@ -876,6 +909,8 @@ def select_walk_forward_params(
     drift_process_var,
     garch_alpha,
     garch_beta,
+    execution_spread=0.0,
+    execution_slippage=0.0,
 ):
     """Choose k and delta on the training window only."""
     sigma_seed = estimate_sigma_seed(train_lp)
@@ -894,6 +929,8 @@ def select_walk_forward_params(
                 drift_process_var=drift_process_var,
                 garch_alpha=garch_alpha,
                 garch_beta=garch_beta,
+                execution_spread=execution_spread,
+                execution_slippage=execution_slippage,
                 mode="Training fold",
             )
             metrics = summarize_simulation(data)
@@ -931,6 +968,8 @@ def select_online_learning_params(
     c_sell,
     garch_alpha,
     garch_beta,
+    execution_spread=0.0,
+    execution_slippage=0.0,
 ):
     """Choose selected Play-Learn parameters on the recent training window."""
     sigma_seed = estimate_sigma_seed(train_lp)
@@ -965,6 +1004,8 @@ def select_online_learning_params(
             max_funnel_lookback=candidate["L"],
             trailing_stop=candidate["a"],
             trend_entry_z=candidate["z_trend"],
+            execution_spread=execution_spread,
+            execution_slippage=execution_slippage,
             mode="Play-Learn training fold",
         )
         metrics = summarize_simulation(data)
@@ -1006,6 +1047,8 @@ def stitch_walk_forward_tests(fold_results, folds, source, mode):
     h = fold_results[0]["h"]
     c_buy = fold_results[0]["c_buy"]
     c_sell = fold_results[0]["c_sell"]
+    execution_spread = fold_results[0].get("execution_spread", 0.0)
+    execution_slippage = fold_results[0].get("execution_slippage", 0.0)
     offset = 0
 
     for fold_idx, data in enumerate(fold_results):
@@ -1039,10 +1082,15 @@ def stitch_walk_forward_tests(fold_results, folds, source, mode):
     prices = np.asarray(concat["prices"], dtype=float)
     buy_hold_w = np.full(prices.size, 1000.0)
     if prices.size > 1:
-        bh_buy_price = prices[1]
+        buy_exec_prices, sell_exec_prices = execution_prices(
+            prices,
+            spread=execution_spread,
+            slippage=execution_slippage,
+        )
+        bh_buy_price = buy_exec_prices[1]
         for t in range(1, prices.size):
             buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
-                prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+                sell_exec_prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
             )
 
     summary = {
@@ -1081,6 +1129,8 @@ def stitch_walk_forward_tests(fold_results, folds, source, mode):
         source=source,
         walk_forward_summary=summary,
         selected_params={"k": last_fold["k"], "delta": last_fold["delta"]},
+        execution_spread=execution_spread,
+        execution_slippage=execution_slippage,
     )
 
 
@@ -1098,6 +1148,8 @@ def run_walk_forward_demo(
     k_grid=None,
     delta_grid=None,
     stitch_tests=True,
+    execution_spread=0.0,
+    execution_slippage=0.0,
 ):
     """
     Demonstrate Phase 6 walk-forward logic on a regime-changing offline path.
@@ -1132,6 +1184,8 @@ def run_walk_forward_demo(
             drift_process_var=drift_process_var,
             garch_alpha=garch_alpha,
             garch_beta=garch_beta,
+            execution_spread=execution_spread,
+            execution_slippage=execution_slippage,
         )
         if chosen is None:
             continue
@@ -1146,6 +1200,8 @@ def run_walk_forward_demo(
             drift_process_var=drift_process_var,
             garch_alpha=garch_alpha,
             garch_beta=garch_beta,
+            execution_spread=execution_spread,
+            execution_slippage=execution_slippage,
             mode="Walk-forward OOS fold",
         )
         metrics = summarize_simulation(test_data)
@@ -1212,6 +1268,8 @@ def run_online_adaptive_strategy(
     k_grid=None,
     delta_grid=None,
     optimize_params=None,
+    execution_spread=0.0,
+    execution_slippage=0.0,
     source="Real daily prices",
 ):
     """
@@ -1231,6 +1289,11 @@ def run_online_adaptive_strategy(
         optimize_params = ["k", "delta"]
 
     prices = np.exp(lp)
+    buy_exec_prices, sell_exec_prices = execution_prices(
+        prices,
+        spread=execution_spread,
+        slippage=execution_slippage,
+    )
     log_returns = np.diff(lp)
     n_steps = lp.size - 1
     N = lp.size
@@ -1273,11 +1336,11 @@ def run_online_adaptive_strategy(
     in_pos = True
     buy_t = 1
     buy_lp = lp[1]
-    buy_price = prices[1]
+    buy_price = buy_exec_prices[1]
     peak_lp = buy_lp
     buy_times.append(1)
     bh_buy_t = 1
-    bh_buy_price = prices[bh_buy_t]
+    bh_buy_price = buy_exec_prices[bh_buy_t]
 
     current_k = float(k_init)
     current_delta = int(delta_init)
@@ -1302,6 +1365,8 @@ def run_online_adaptive_strategy(
                     drift_process_var=current_q,
                     garch_alpha=garch_alpha,
                     garch_beta=garch_beta,
+                    execution_spread=execution_spread,
+                    execution_slippage=execution_slippage,
                 )
                 if chosen is not None:
                     chosen = {
@@ -1330,6 +1395,8 @@ def run_online_adaptive_strategy(
                     c_sell=c_sell,
                     garch_alpha=garch_alpha,
                     garch_beta=garch_beta,
+                    execution_spread=execution_spread,
+                    execution_slippage=execution_slippage,
                 )
             if chosen is not None:
                 old_k = current_k
@@ -1430,6 +1497,7 @@ def run_online_adaptive_strategy(
                 Z = (lp[t] - ref_lp - drift_since_ref) / denom if denom > 0 else np.nan
                 Zsig[t] = Z
                 log_ret = lp[t] - buy_lp
+                exec_log_ret = np.log(sell_exec_prices[t]) - np.log(buy_price)
                 trail_drawdown = peak_lp - lp[t]
                 funnel_exit = (
                     el >= current_delta + 1
@@ -1437,21 +1505,25 @@ def run_online_adaptive_strategy(
                     and Z > current_k
                     and not np.isnan(M)
                     and M <= 0
-                    and log_ret > h
+                    and exec_log_ret > h
                 )
                 trailing_exit = (
                     current_a is not None
-                    and log_ret > h
+                    and exec_log_ret > h
                     and trail_drawdown >= current_a
                 )
                 if funnel_exit or trailing_exit:
                     net_mult = net_liquidation_multiplier(
-                        prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                        sell_exec_prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
                     )
                     trade_log.append({
                         "buy_t": buy_t,
                         "sell_t": t,
                         "gross_log_return": log_ret,
+                        "exec_log_return": exec_log_ret,
+                        "buy_exec_price": buy_price,
+                        "signal_price": prices[t],
+                        "sell_exec_price": sell_exec_prices[t],
                         "net_multiplier": net_mult,
                         "exit_reason": "trailing" if trailing_exit else "funnel",
                     })
@@ -1478,7 +1550,7 @@ def run_online_adaptive_strategy(
                         in_pos = True
                         buy_t = t
                         buy_lp = lp[t]
-                        buy_price = prices[t]
+                        buy_price = buy_exec_prices[t]
                         peak_lp = buy_lp
                         buy_times.append(t)
 
@@ -1486,13 +1558,13 @@ def run_online_adaptive_strategy(
         realized_w[t] = wealth
         if in_pos and buy_t is not None:
             portfolio_w[t] = wealth * net_liquidation_multiplier(
-                prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
+                sell_exec_prices[t], buy_price, c_buy=c_buy, c_sell=c_sell
             )
         else:
             portfolio_w[t] = wealth
         if t >= bh_buy_t:
             buy_hold_w[t] = 1000.0 * net_liquidation_multiplier(
-                prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
+                sell_exec_prices[t], bh_buy_price, c_buy=c_buy, c_sell=c_sell
             )
 
     return dict(
@@ -1517,6 +1589,8 @@ def run_online_adaptive_strategy(
             "a": current_a,
             "z_trend": current_z,
             "rho": current_rho,
+            "spread": execution_spread,
+            "slippage": execution_slippage,
         },
         online_summary={
             "updates": len(parameter_log),
@@ -1527,6 +1601,8 @@ def run_online_adaptive_strategy(
             "trend_entry_z": current_z,
             "optimized": list(optimize_params),
         },
+        execution_spread=execution_spread,
+        execution_slippage=execution_slippage,
     )
 
 
@@ -1544,6 +1620,8 @@ def run_real_price_walk_forward(
     delta_init=3,
     trailing_stop=0.04,
     trend_entry_z=0.35,
+    execution_spread=0.0,
+    execution_slippage=0.0,
 ):
     """Fetch real market bars and run one continuous online adaptive test."""
     full_lp = fetch_yahoo_log_prices(
@@ -1563,6 +1641,8 @@ def run_real_price_walk_forward(
         delta_init=delta_init,
         trailing_stop=trailing_stop,
         trend_entry_z=trend_entry_z,
+        execution_spread=execution_spread,
+        execution_slippage=execution_slippage,
         source=f"Yahoo adjusted {symbol.upper()}, {real_period_label(lookback_days, interval)}",
     )
     data["symbol"] = symbol.upper()
@@ -1768,6 +1848,8 @@ class MainWindow(QMainWindow):
             ("rho  (learn rate)",   "rho",   5,  80,  25, 100),
             ("mom c  (gen)",        "mom_c", 0,  8,   2, 100),
             ("cost/side",           "cost",  0,  50,   0, 10000),
+            ("spread",              "spread", 0, 100,  0, 10000),
+            ("slip/side",           "slippage", 0, 50, 0, 10000),
         ]
         for idx, (lbl, key, mn, mx, val, scale) in enumerate(defs):
             block_row = (idx // 3) * 2
@@ -1961,7 +2043,7 @@ class MainWindow(QMainWindow):
         if key == "z_trend": return f"{v:.2f}"
         if key == "rho": return f"{v:.2f}"
         if key == "mom_c": return f"{v:.2f}"
-        if key == "cost":  return f"{v * 10000:.0f} bp"
+        if key in ("cost", "spread", "slippage"): return f"{v * 10000:.0f} bp"
         return str(v)
 
     def _btn(self, text, slot, enabled=True):
@@ -2002,6 +2084,8 @@ class MainWindow(QMainWindow):
             max_funnel_lookback=int(p["lookback_L"]),
             trailing_stop=p["trail_a"],
             trend_entry_z=p["z_trend"],
+            execution_spread=p["spread"],
+            execution_slippage=p["slippage"],
         )
         self.sim_data = data
         self.fixed_sim_data = data
@@ -2062,6 +2146,8 @@ class MainWindow(QMainWindow):
                 trailing_stop=p["trail_a"],
                 trend_entry_z=p["z_trend"],
                 generalized_momentum_c=p["mom_c"],
+                execution_spread=p["spread"],
+                execution_slippage=p["slippage"],
                 mode="Synthetic generalized momentum",
                 extra={
                     "source": "Same generated path; generalized momentum exit",
@@ -2070,6 +2156,8 @@ class MainWindow(QMainWindow):
                         "delta": int(p["delta"]),
                         "L": int(p["lookback_L"]),
                         "mom_c": p["mom_c"],
+                        "spread": p["spread"],
+                        "slippage": p["slippage"],
                     },
                 },
             )
@@ -2088,6 +2176,8 @@ class MainWindow(QMainWindow):
                 trend_entry_z=p["z_trend"],
                 use_hmm_regime=True,
                 hmm_states=3,
+                execution_spread=p["spread"],
+                execution_slippage=p["slippage"],
                 mode="Synthetic regime HMM",
                 extra={
                     "source": "Same generated path; 3-state HMM funnel",
@@ -2096,6 +2186,8 @@ class MainWindow(QMainWindow):
                         "delta": int(p["delta"]),
                         "L": int(p["lookback_L"]),
                         "states": 3,
+                        "spread": p["spread"],
+                        "slippage": p["slippage"],
                     },
                 },
             )
@@ -2113,6 +2205,8 @@ class MainWindow(QMainWindow):
                 trailing_stop=p["trail_a"],
                 trend_entry_z=p["z_trend"],
                 randomized_stopping=True,
+                execution_spread=p["spread"],
+                execution_slippage=p["slippage"],
                 mode="Synthetic randomized stopping",
                 extra={
                     "source": "Same generated path; stochastic eligible exits",
@@ -2122,6 +2216,8 @@ class MainWindow(QMainWindow):
                         "L": int(p["lookback_L"]),
                         "random_slope": DEFAULT_RANDOM_STOP_SLOPE,
                         "random_seed": DEFAULT_RANDOM_STOP_SEED,
+                        "spread": p["spread"],
+                        "slippage": p["slippage"],
                     },
                 },
             )
@@ -2190,6 +2286,8 @@ class MainWindow(QMainWindow):
                 trailing_stop=p["trail_a"],
                 trend_entry_z=p["z_trend"],
                 optimize_params=optimize_params,
+                execution_spread=p["spread"],
+                execution_slippage=p["slippage"],
                 source="Same synthetic path as Simulate",
             )
         except Exception as exc:
@@ -2275,6 +2373,8 @@ class MainWindow(QMainWindow):
             c_buy=p["cost"],
             c_sell=p["cost"],
             drift_process_var=p["drift_q"] * 1e-8,
+            execution_spread=p["spread"],
+            execution_slippage=p["slippage"],
         )
         self.sim_data = data
         self.scrubber.setMaximum(data["N"])
@@ -2323,6 +2423,8 @@ class MainWindow(QMainWindow):
                     "L": int(p["lookback_L"]),
                     "a": p["trail_a"],
                     "z_trend": p["z_trend"],
+                    "spread": p["spread"],
+                    "slippage": p["slippage"],
                 }
                 generalized_c = None
                 use_hmm = False
@@ -2356,6 +2458,8 @@ class MainWindow(QMainWindow):
                     use_hmm_regime=use_hmm,
                     hmm_states=3,
                     randomized_stopping=randomized,
+                    execution_spread=p["spread"],
+                    execution_slippage=p["slippage"],
                     mode=mode_label,
                     extra={
                         "source": source,
@@ -2375,6 +2479,8 @@ class MainWindow(QMainWindow):
                     trailing_stop=p["trail_a"],
                     trend_entry_z=p["z_trend"],
                     optimize_params=optimize_params,
+                    execution_spread=p["spread"],
+                    execution_slippage=p["slippage"],
                     source=source,
                 )
                 data["mode"] = f"Real {symbol.upper()} online adaptive"
