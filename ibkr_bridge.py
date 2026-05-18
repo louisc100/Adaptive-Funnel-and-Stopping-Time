@@ -19,13 +19,18 @@ Example:
     python3 ibkr_bridge.py --symbol AAPL --port 7497
     python3 ibkr_bridge.py --preset apple
     python3 ibkr_bridge.py --preset spy --market-data-type delayed
+    python3 ibkr_bridge.py --preset spy --watch --duration 30
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -62,6 +67,19 @@ class QuoteSnapshot:
     market_data_type: str
 
 
+@dataclass
+class QuoteRow:
+    timestamp: str
+    symbol: str
+    bid: float | None
+    ask: float | None
+    last: float | None
+    mid: float | None
+    spread: float | None
+    spread_bps: float | None
+    market_data_type: str
+
+
 def _safe_float(value):
     """Return None for IBKR's unset/NaN quote values."""
     try:
@@ -76,6 +94,10 @@ def _format_price(value):
     return "n/a" if value is None else f"{value:.4f}"
 
 
+def _format_bps(value):
+    return "n/a" if value is None else f"{value:.2f}"
+
+
 def _first_price(*values):
     """Return the first usable price from normal or delayed ticker fields."""
     for value in values:
@@ -83,6 +105,62 @@ def _first_price(*values):
         if price is not None:
             return price
     return None
+
+
+def _quote_from_ticker(ticker, symbol, market_data_type):
+    bid = _first_price(ticker.bid, getattr(ticker, "delayedBid", None))
+    ask = _first_price(ticker.ask, getattr(ticker, "delayedAsk", None))
+    last = _first_price(ticker.last, getattr(ticker, "delayedLast", None), ticker.close)
+    mid = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+    spread = ask - bid if bid is not None and ask is not None else None
+    spread_bps = 10000.0 * spread / mid if spread is not None and mid else None
+    return QuoteRow(
+        timestamp=datetime.now().isoformat(timespec="seconds"),
+        symbol=symbol,
+        bid=bid,
+        ask=ask,
+        last=last,
+        mid=mid,
+        spread=spread,
+        spread_bps=spread_bps,
+        market_data_type=market_data_type,
+    )
+
+
+def _print_quote_row(row):
+    print(
+        f"{row.timestamp} | {row.symbol:<5} | "
+        f"bid {_format_price(row.bid):>10} | "
+        f"ask {_format_price(row.ask):>10} | "
+        f"mid {_format_price(row.mid):>10} | "
+        f"last {_format_price(row.last):>10} | "
+        f"spread {_format_price(row.spread):>9} | "
+        f"{_format_bps(row.spread_bps):>7} bp"
+    )
+
+
+def _open_quote_log(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    file_obj = path.open("a", newline="")
+    writer = csv.DictWriter(
+        file_obj,
+        fieldnames=[
+            "timestamp",
+            "symbol",
+            "bid",
+            "ask",
+            "last",
+            "mid",
+            "spread",
+            "spread_bps",
+            "market_data_type",
+        ],
+    )
+    if not exists:
+        writer.writeheader()
+    return file_obj, writer
 
 
 def fetch_stock_quote(
@@ -127,21 +205,92 @@ def fetch_stock_quote(
         ticker = ib.reqMktData(contract, "", snapshot=False, regulatorySnapshot=False)
         ib.sleep(4.0)
 
-        bid = _first_price(ticker.bid, getattr(ticker, "delayedBid", None))
-        ask = _first_price(ticker.ask, getattr(ticker, "delayedAsk", None))
-        last = _first_price(ticker.last, getattr(ticker, "delayedLast", None), ticker.close)
-        mid = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+        row = _quote_from_ticker(ticker, symbol, market_data_type)
 
         return QuoteSnapshot(
             symbol=symbol,
-            bid=bid,
-            ask=ask,
-            last=last,
-            mid=mid,
+            bid=row.bid,
+            ask=row.ask,
+            last=row.last,
+            mid=row.mid,
             market_data_type=market_data_type,
         )
     finally:
         if ib.isConnected():
+            ib.disconnect()
+
+
+def watch_stock_quote(
+    symbol=DEFAULT_SYMBOL,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    client_id=DEFAULT_CLIENT_ID,
+    timeout=8.0,
+    market_data_type=DEFAULT_MARKET_DATA_TYPE,
+    interval=5.0,
+    duration=None,
+    log_path=None,
+):
+    """Continuously print read-only Level 1 quotes from TWS."""
+    try:
+        from ib_insync import IB, Stock
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: ib_insync.\n"
+            "Install it inside your project environment with:\n"
+            "    pip install ib_insync\n"
+            "or, if using your venv explicitly:\n"
+            "    ./venv/bin/python -m pip install ib_insync"
+        ) from exc
+
+    symbol = symbol.upper().strip()
+    if not symbol:
+        raise ValueError("Symbol cannot be empty.")
+    if market_data_type not in MARKET_DATA_TYPES:
+        raise ValueError(
+            "market_data_type must be one of: "
+            + ", ".join(MARKET_DATA_TYPES)
+        )
+    interval = max(float(interval), 0.5)
+    duration = None if duration is None else max(float(duration), 0.0)
+
+    log_file = None
+    log_writer = None
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout)
+        ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
+        ib.sleep(0.5)
+        contract = Stock(symbol, "SMART", "USD")
+        ib.qualifyContracts(contract)
+        ticker = ib.reqMktData(contract, "", snapshot=False, regulatorySnapshot=False)
+        if log_path:
+            log_file, log_writer = _open_quote_log(log_path)
+
+        print(
+            f"Watching {symbol} {market_data_type} quotes "
+            f"every {interval:g}s. Press Ctrl+C to stop."
+        )
+        if log_path:
+            print(f"Logging to {log_path}")
+        start = time.monotonic()
+        while True:
+            ib.sleep(interval)
+            row = _quote_from_ticker(ticker, symbol, market_data_type)
+            _print_quote_row(row)
+            if log_writer:
+                log_writer.writerow(row.__dict__)
+                log_file.flush()
+            if duration is not None and time.monotonic() - start >= duration:
+                break
+    finally:
+        if log_file:
+            log_file.close()
+        if ib.isConnected():
+            try:
+                ib.cancelMktData(contract)
+            except Exception:
+                pass
             ib.disconnect()
 
 
@@ -155,7 +304,8 @@ def parse_args(argv):
             "Examples:\n"
             "  ./venv/bin/python ibkr_bridge.py --preset apple\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol AAPL --port 7497 --market-data-type delayed\n"
-            "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed"
+            "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed\n"
+            "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -170,6 +320,10 @@ def parse_args(argv):
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="TWS API port, usually 7497 for paper/demo.")
     parser.add_argument("--client-id", type=int, default=DEFAULT_CLIENT_ID, help="Unique API client id.")
     parser.add_argument("--timeout", type=float, default=8.0, help="Connection timeout in seconds.")
+    parser.add_argument("--watch", action="store_true", help="Continuously print quotes until stopped.")
+    parser.add_argument("--interval", type=float, default=5.0, help="Watch-mode print interval in seconds.")
+    parser.add_argument("--duration", type=float, default=None, help="Optional watch-mode duration in seconds.")
+    parser.add_argument("--log-csv", default=None, help="Optional CSV path for watch-mode quote logging.")
     parser.add_argument(
         "--market-data-type",
         choices=tuple(MARKET_DATA_TYPES),
@@ -185,6 +339,34 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     symbol = args.symbol or SYMBOL_PRESETS[args.preset]
+    if args.watch:
+        try:
+            print(
+                "Requesting "
+                f"{args.market_data_type} market data "
+                f"(IBKR marketDataType={MARKET_DATA_TYPES[args.market_data_type]})."
+            )
+            watch_stock_quote(
+                symbol=symbol,
+                host=args.host,
+                port=args.port,
+                client_id=args.client_id,
+                timeout=args.timeout,
+                market_data_type=args.market_data_type,
+                interval=args.interval,
+                duration=args.duration,
+                log_path=args.log_csv,
+            )
+        except KeyboardInterrupt:
+            print("\nStopped quote watch.")
+            return 0
+        except Exception as exc:
+            print("IBKR bridge watch failed.")
+            print(str(exc))
+            return 1
+        print("No orders were placed.")
+        return 0
+
     try:
         print(
             "Requesting "
