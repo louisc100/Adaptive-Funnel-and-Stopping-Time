@@ -17,6 +17,8 @@ Setup:
 
 Example:
     python3 ibkr_bridge.py --symbol AAPL --port 7497
+    python3 ibkr_bridge.py --preset apple
+    python3 ibkr_bridge.py --preset spy --market-data-type delayed
 """
 
 from __future__ import annotations
@@ -30,6 +32,18 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 7497
 DEFAULT_CLIENT_ID = 17
 DEFAULT_SYMBOL = "AAPL"
+DEFAULT_MARKET_DATA_TYPE = "delayed"
+SYMBOL_PRESETS = {
+    "apple": "AAPL",
+    "aapl": "AAPL",
+    "spy": "SPY",
+    "nvidia": "NVDA",
+    "nvda": "NVDA",
+    "microsoft": "MSFT",
+    "msft": "MSFT",
+    "tesla": "TSLA",
+    "tsla": "TSLA",
+}
 MARKET_DATA_TYPES = {
     "live": 1,
     "frozen": 2,
@@ -77,7 +91,7 @@ def fetch_stock_quote(
     port=DEFAULT_PORT,
     client_id=DEFAULT_CLIENT_ID,
     timeout=8.0,
-    market_data_type="delayed",
+    market_data_type=DEFAULT_MARKET_DATA_TYPE,
 ):
     """Connect to TWS and request a read-only stock quote snapshot."""
     try:
@@ -104,6 +118,9 @@ def fetch_stock_quote(
     try:
         ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout)
         ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
+        # Give TWS a moment to apply the requested market-data mode before
+        # creating the subscription. This matters most when forcing delayed.
+        ib.sleep(0.5)
         contract = Stock(symbol, "SMART", "USD")
         ib.qualifyContracts(contract)
 
@@ -130,9 +147,25 @@ def fetch_stock_quote(
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(
-        description="Read bid/ask/mid from a local TWS demo/paper session."
+        description=(
+            "Read bid/ask/mid from a local TWS demo/paper session. "
+            "This script is read-only and never places orders."
+        ),
+        epilog=(
+            "Examples:\n"
+            "  ./venv/bin/python ibkr_bridge.py --preset apple\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol AAPL --port 7497 --market-data-type delayed\n"
+            "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("--symbol", default=DEFAULT_SYMBOL, help="Stock symbol, e.g. AAPL.")
+    parser.add_argument("--symbol", default=None, help="Stock symbol, e.g. AAPL.")
+    parser.add_argument(
+        "--preset",
+        choices=tuple(SYMBOL_PRESETS),
+        default="apple",
+        help="Friendly symbol preset. Ignored if --symbol is provided.",
+    )
     parser.add_argument("--host", default=DEFAULT_HOST, help="TWS host, usually 127.0.0.1.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="TWS API port, usually 7497 for paper/demo.")
     parser.add_argument("--client-id", type=int, default=DEFAULT_CLIENT_ID, help="Unique API client id.")
@@ -140,17 +173,26 @@ def parse_args(argv):
     parser.add_argument(
         "--market-data-type",
         choices=tuple(MARKET_DATA_TYPES),
-        default="delayed",
-        help="Requested IBKR market data mode. Use delayed if live API data is not subscribed.",
+        default=DEFAULT_MARKET_DATA_TYPE,
+        help=(
+            "Requested IBKR market data mode. Default is delayed "
+            "(IBKR API marketDataType=3), not live."
+        ),
     )
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    symbol = args.symbol or SYMBOL_PRESETS[args.preset]
     try:
+        print(
+            "Requesting "
+            f"{args.market_data_type} market data "
+            f"(IBKR marketDataType={MARKET_DATA_TYPES[args.market_data_type]})."
+        )
         quote = fetch_stock_quote(
-            symbol=args.symbol,
+            symbol=symbol,
             host=args.host,
             port=args.port,
             client_id=args.client_id,
@@ -182,10 +224,11 @@ def main(argv=None):
         print("Most likely cause:")
         print("    TWS API market data permission is not available for this symbol/feed.")
         print("Things to try:")
-        print("    1. Retry during regular US market hours.")
-        print("    2. In TWS, open Market Data Connections and check the subscription message.")
-        print("    3. Try another symbol or market-data type, e.g. delayed-frozen.")
-        print("    4. If you want live bid/ask through the API, enable the needed IBKR market data subscription.")
+        print("    1. Try the Apple preset: ./venv/bin/python ibkr_bridge.py --preset apple")
+        print("    2. Retry during regular US market hours.")
+        print("    3. In TWS, open Market Data Connections and check the subscription message.")
+        print("    4. Try another market-data type, e.g. delayed-frozen.")
+        print("    5. If delayed still returns 10089, IBKR is blocking even delayed API data for this symbol/feed.")
         return 2
     return 0
 
