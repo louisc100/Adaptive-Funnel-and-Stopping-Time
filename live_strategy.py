@@ -150,6 +150,7 @@ class LiveDryRunStrategy:
         self.fixed_sell_fee = max(float(fixed_sell_fee), 0.0)
         self.order_quantity = max(int(order_quantity), 1)
         self.bars = []
+        self.latest_data = None
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -173,7 +174,8 @@ class LiveDryRunStrategy:
                 block_reason=block_reason,
             )
 
-        mids = np.asarray([b.close_mid for b in self.bars], dtype=float)
+        strategy_bars = self._bars_for_strategy()
+        mids = np.asarray([b.close_mid for b in strategy_bars], dtype=float)
         lp = np.log(mids)
         sigma_seed = estimate_sigma_seed(lp)
         effective_cost = self._effective_proportional_cost(bar.close_mid)
@@ -192,6 +194,7 @@ class LiveDryRunStrategy:
             execution_slippage=self.execution_slippage,
             mode="IBKR dry-run",
         )
+        self.latest_data = data
         t = data["N"]
         buy_now = t in data["buy_times"]
         sell_now = t in data["sell_times"]
@@ -285,6 +288,22 @@ class LiveDryRunStrategy:
             "buy": self.cost + self.fixed_buy_fee / notional,
             "sell": self.cost + self.fixed_sell_fee / notional,
         }
+
+    def _bars_for_strategy(self):
+        """Add a synthetic entry anchor when TWS reports an existing position."""
+        if (
+            self.initial_position is None
+            or self.initial_position <= 0
+            or self.initial_avg_cost is None
+            or self.initial_avg_cost <= 0
+        ):
+            return self.bars
+
+        entry = float(self.initial_avg_cost)
+        first_ts = self.bars[0].timestamp
+        anchor0 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
+        anchor1 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
+        return [anchor0, anchor1] + self.bars
 
     def _is_regular_hours(self, timestamp):
         dt = datetime.fromisoformat(timestamp)

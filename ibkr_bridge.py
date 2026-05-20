@@ -283,6 +283,80 @@ def _open_signal_log(path):
     return file_obj, writer
 
 
+def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
+    """Save a refreshed live plot of mid-price, funnel, and Z statistic."""
+    data = getattr(strategy, "latest_data", None)
+    if data is None:
+        return
+
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    prices = data["prices"]
+    funnel_mid = data["funnel_mid"]
+    funnel_up = data["funnel_up"]
+    funnel_low = data["funnel_low"]
+    zsig = data["Zsig"]
+    holding = data["holding"]
+    t_end = int(data["N"]) + 1
+    start = max(0, t_end - int(window_bars))
+    xs = list(range(start, t_end))
+
+    fig = Figure(figsize=(11, 7), dpi=120, facecolor="#10151f")
+    canvas = FigureCanvasAgg(fig)
+    gs = fig.add_gridspec(2, 1, height_ratios=[2.0, 1.0], hspace=0.24)
+    ax_p = fig.add_subplot(gs[0])
+    ax_z = fig.add_subplot(gs[1], sharex=ax_p)
+    for ax in (ax_p, ax_z):
+        ax.set_facecolor("#151b26")
+        ax.grid(True, color="#2a3342", alpha=0.65, linewidth=0.7)
+        ax.tick_params(colors="#d6deeb")
+        for spine in ax.spines.values():
+            spine.set_color("#3b4658")
+
+    ax_p.plot(xs, prices[start:t_end], color="#5dade2", lw=1.6, label="Mid price")
+    ax_p.plot(xs, funnel_up[start:t_end], color="#f59e0b", lw=1.0, ls="--", label="Upper funnel")
+    ax_p.plot(xs, funnel_low[start:t_end], color="#7dd3fc", lw=1.0, ls="--", label="Lower funnel")
+    ax_p.plot(xs, funnel_mid[start:t_end], color="#cbd5e1", lw=0.9, ls=":", label="Funnel center")
+
+    buy_x = [x for x in data["buy_times"] if start <= x < t_end]
+    # The research engine starts from an internal reference buy at t=1.
+    # In account-aware cash mode that is not a live buy signal, so hide it.
+    if getattr(strategy, "initial_position", None) is not None:
+        buy_x = [x for x in buy_x if x != 1]
+    sell_x = [x for x in data["sell_times"] if start <= x < t_end]
+    if buy_x:
+        ax_p.scatter(buy_x, [prices[x] for x in buy_x], marker="^", s=55, color="#22c55e", label="Buy")
+    if sell_x:
+        ax_p.scatter(sell_x, [prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Sell")
+
+    current_color = "#22c55e" if holding[int(data["N"])] else "#f97316"
+    ax_p.scatter([int(data["N"])], [prices[int(data["N"])]], s=65, color=current_color, zorder=5)
+    ax_p.set_ylabel("Price", color="#d6deeb")
+    ax_p.set_title(
+        f"{signal.symbol} live strategy | {signal.signal} | "
+        f"mid {signal.close_mid:.2f} | W {signal.mtm_w:.2f}",
+        color="#f8fafc",
+    )
+    ax_p.legend(loc="upper left", ncol=4, fontsize=8, facecolor="#10151f", edgecolor="#3b4658", labelcolor="#d6deeb")
+
+    ax_z.plot(xs, zsig[start:t_end], color="#14b8a6", lw=1.4, label="Z statistic")
+    ax_z.axhline(float(data["k"]), color="#ef4444", lw=0.9, ls="--", label="+k")
+    ax_z.axhline(-float(data["k"]), color="#22c55e", lw=0.9, ls="--", label="-k")
+    trend_z = data.get("trend_entry_z")
+    if trend_z is not None:
+        ax_z.axhline(float(trend_z), color="#f59e0b", lw=0.8, ls=":", label="z_trend")
+    ax_z.set_ylabel("Z", color="#d6deeb")
+    ax_z.set_xlabel("Completed live bar index", color="#d6deeb")
+    ax_z.legend(loc="upper left", ncol=4, fontsize=8, facecolor="#10151f", edgecolor="#3b4658", labelcolor="#d6deeb")
+
+    fig.savefig(path, bbox_inches="tight")
+    canvas.draw()
+
+
 def fetch_stock_quote(
     symbol=DEFAULT_SYMBOL,
     host=DEFAULT_HOST,
@@ -354,6 +428,8 @@ def watch_stock_quote(
     bar_seconds=60,
     strategy_kwargs=None,
     signal_log_path=None,
+    live_plot_path=None,
+    plot_window_bars=120,
     manual_orders=False,
     auto_orders=False,
     order_quantity=4,
@@ -426,6 +502,8 @@ def watch_stock_quote(
             print(f"Logging to {log_path}")
         if signal_log_path:
             print(f"Logging strategy signals to {signal_log_path}")
+        if live_plot_path:
+            print(f"Refreshing live strategy plot at {live_plot_path}")
         start = time.monotonic()
         last_good_quote_monotonic = None
         while True:
@@ -449,6 +527,13 @@ def watch_stock_quote(
                     if signal_log_writer:
                         signal_log_writer.writerow(signal_to_dict(signal))
                         signal_log_file.flush()
+                    if live_plot_path:
+                        _save_live_strategy_plot(
+                            strategy,
+                            signal,
+                            live_plot_path,
+                            window_bars=plot_window_bars,
+                        )
                     if manual_orders or auto_orders:
                         trade = _handle_order_signal(
                             ib,
@@ -621,6 +706,17 @@ def parse_args(argv):
         help="Optional CSV path for dry-run strategy signals.",
     )
     parser.add_argument(
+        "--live-plot",
+        default=None,
+        help="Optional PNG path refreshed after each completed strategy bar.",
+    )
+    parser.add_argument(
+        "--plot-window-bars",
+        type=int,
+        default=120,
+        help="Number of recent completed bars shown in --live-plot.",
+    )
+    parser.add_argument(
         "--manual-orders",
         action="store_true",
         help="Prompt before submitting a limit order when dry-run emits WOULD BUY/WOULD SELL.",
@@ -774,6 +870,8 @@ def main(argv=None):
                     "order_quantity": args.order_quantity,
                 },
                 signal_log_path=args.signal_log,
+                live_plot_path=args.live_plot,
+                plot_window_bars=args.plot_window_bars,
                 manual_orders=args.manual_orders,
                 auto_orders=args.auto_orders,
                 order_quantity=args.order_quantity,
