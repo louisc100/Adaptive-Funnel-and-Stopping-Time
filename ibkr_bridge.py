@@ -21,6 +21,7 @@ Example:
     python3 ibkr_bridge.py --preset spy --market-data-type delayed
     python3 ibkr_bridge.py --preset spy --watch --duration 30
     python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy
+    python3 ibkr_bridge.py --positions
 """
 
 from __future__ import annotations
@@ -93,6 +94,12 @@ def _safe_float(value):
 
 def _format_price(value):
     return "n/a" if value is None else f"{value:.4f}"
+
+
+def _format_quantity(value):
+    if value is None:
+        return "n/a"
+    return f"{float(value):.4f}".rstrip("0").rstrip(".")
 
 
 def _format_bps(value):
@@ -314,6 +321,66 @@ def watch_stock_quote(
             ib.disconnect()
 
 
+def fetch_positions(
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    client_id=DEFAULT_CLIENT_ID,
+    timeout=8.0,
+):
+    """Fetch current account positions from TWS without placing orders."""
+    try:
+        from ib_insync import IB
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: ib_insync.\n"
+            "Install it inside your project environment with:\n"
+            "    pip install ib_insync\n"
+            "or, if using your venv explicitly:\n"
+            "    ./venv/bin/python -m pip install ib_insync"
+        ) from exc
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout)
+        positions = ib.positions()
+        return [
+            {
+                "account": p.account,
+                "symbol": getattr(p.contract, "symbol", ""),
+                "sec_type": getattr(p.contract, "secType", ""),
+                "exchange": getattr(p.contract, "exchange", ""),
+                "currency": getattr(p.contract, "currency", ""),
+                "position": float(p.position),
+                "avg_cost": float(p.avgCost),
+            }
+            for p in positions
+        ]
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+
+
+def print_positions(positions):
+    if not positions:
+        print("No open positions.")
+        return
+    print(
+        f"{'Account':<14} {'Symbol':<8} {'Type':<6} {'Exchange':<10} "
+        f"{'Currency':<8} {'Position':>12} {'Avg Cost':>12}"
+    )
+    print("-" * 78)
+    for p in positions:
+        print(
+            f"{p['account']:<14} "
+            f"{p['symbol']:<8} "
+            f"{p['sec_type']:<6} "
+            f"{p['exchange']:<10} "
+            f"{p['currency']:<8} "
+            f"{_format_quantity(p['position']):>12} "
+            f"{_format_price(p['avg_cost']):>12}"
+        )
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description=(
@@ -326,7 +393,8 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --symbol AAPL --port 7497 --market-data-type delayed\n"
             "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed\n"
             "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30\n"
-            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy\n"
+            "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -341,6 +409,7 @@ def parse_args(argv):
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="TWS API port, usually 7497 for paper/demo.")
     parser.add_argument("--client-id", type=int, default=DEFAULT_CLIENT_ID, help="Unique API client id.")
     parser.add_argument("--timeout", type=float, default=8.0, help="Connection timeout in seconds.")
+    parser.add_argument("--positions", action="store_true", help="Print current account positions and exit.")
     parser.add_argument("--watch", action="store_true", help="Continuously print quotes until stopped.")
     parser.add_argument("--interval", type=float, default=5.0, help="Watch-mode print interval in seconds.")
     parser.add_argument("--duration", type=float, default=None, help="Optional watch-mode duration in seconds.")
@@ -373,6 +442,23 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     symbol = args.symbol or SYMBOL_PRESETS[args.preset]
+    if args.positions:
+        try:
+            positions = fetch_positions(
+                host=args.host,
+                port=args.port,
+                client_id=args.client_id,
+                timeout=args.timeout,
+            )
+        except Exception as exc:
+            print("IBKR positions check failed.")
+            print(str(exc))
+            return 1
+        print_positions(positions)
+        print("")
+        print("No orders were placed.")
+        return 0
+
     if args.watch or args.dry_run_strategy:
         try:
             print(
