@@ -22,6 +22,7 @@ Example:
     python3 ibkr_bridge.py --preset spy --watch --duration 30
     python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy
     python3 ibkr_bridge.py --positions
+    python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders
 """
 
 from __future__ import annotations
@@ -113,6 +114,57 @@ def _first_price(*values):
         if price is not None:
             return price
     return None
+
+
+def _limit_price_for_signal(signal, limit_buffer_bps):
+    buffer = max(float(limit_buffer_bps), 0.0) / 10000.0
+    if signal.signal == "WOULD BUY":
+        return signal.close_ask * (1.0 + buffer)
+    if signal.signal == "WOULD SELL":
+        return signal.close_bid * (1.0 - buffer)
+    return None
+
+
+def _manual_confirm_order(ib, contract, signal, quantity, limit_buffer_bps):
+    """Prompt before placing a paper/live limit order."""
+    if signal.signal not in ("WOULD BUY", "WOULD SELL"):
+        return None
+    if signal.blocked:
+        print(f"Manual order skipped: signal blocked by {signal.block_reason}.")
+        return None
+    limit_price = _limit_price_for_signal(signal, limit_buffer_bps)
+    if limit_price is None:
+        return None
+    action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
+    quantity = int(quantity)
+    if quantity <= 0:
+        print("Manual order skipped: quantity must be positive.")
+        return None
+
+    print("")
+    print("Manual order confirmation")
+    print(f"Signal: {signal.signal}")
+    print(f"Symbol: {signal.symbol}")
+    print(f"Action: {action}")
+    print(f"Quantity: {quantity}")
+    print(f"Reference bid/ask: {_format_price(signal.close_bid)} / {_format_price(signal.close_ask)}")
+    print(f"Suggested LMT price: {_format_price(limit_price)}")
+    answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
+    if answer != "y":
+        print("Order skipped by user.")
+        return None
+
+    from ib_insync import LimitOrder
+
+    order = LimitOrder(action, quantity, round(limit_price, 2), tif="DAY")
+    trade = ib.placeOrder(contract, order)
+    ib.sleep(1.0)
+    print(
+        "Submitted order: "
+        f"{action} {quantity} {signal.symbol} LMT {_format_price(order.lmtPrice)} "
+        f"status={trade.orderStatus.status}"
+    )
+    return trade
 
 
 def _quote_from_ticker(ticker, symbol, market_data_type):
@@ -272,6 +324,9 @@ def watch_stock_quote(
     bar_seconds=60,
     strategy_kwargs=None,
     signal_log_path=None,
+    manual_orders=False,
+    order_quantity=1,
+    limit_buffer_bps=5.0,
 ):
     """Continuously print read-only Level 1 quotes from TWS."""
     try:
@@ -316,7 +371,13 @@ def watch_stock_quote(
 
     ib = IB()
     try:
-        ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout)
+        ib.connect(
+            host,
+            port,
+            clientId=client_id,
+            readonly=not manual_orders,
+            timeout=timeout,
+        )
         ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
         ib.sleep(0.5)
         contract = Stock(symbol, "SMART", "USD")
@@ -356,6 +417,14 @@ def watch_stock_quote(
                     if signal_log_writer:
                         signal_log_writer.writerow(signal_to_dict(signal))
                         signal_log_file.flush()
+                    if manual_orders:
+                        _manual_confirm_order(
+                            ib,
+                            contract,
+                            signal,
+                            quantity=order_quantity,
+                            limit_buffer_bps=limit_buffer_bps,
+                        )
             if log_writer:
                 log_writer.writerow(row.__dict__)
                 log_file.flush()
@@ -460,6 +529,7 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders\n"
             "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -513,6 +583,18 @@ def parse_args(argv):
         default=None,
         help="Optional CSV path for dry-run strategy signals.",
     )
+    parser.add_argument(
+        "--manual-orders",
+        action="store_true",
+        help="Prompt before submitting a limit order when dry-run emits WOULD BUY/WOULD SELL.",
+    )
+    parser.add_argument("--order-quantity", type=int, default=1, help="Manual order quantity.")
+    parser.add_argument(
+        "--limit-buffer-bps",
+        type=float,
+        default=5.0,
+        help="Manual order buffer in basis points: buy above ask, sell below bid.",
+    )
     parser.add_argument("--k", type=float, default=1.2, help="Strategy funnel threshold.")
     parser.add_argument("--delta", type=int, default=8, help="Strategy momentum window in bars.")
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
@@ -553,6 +635,9 @@ def main(argv=None):
         return 0
 
     if args.watch or args.dry_run_strategy:
+        if args.manual_orders and not args.dry_run_strategy:
+            print("--manual-orders requires --dry-run-strategy.")
+            return 1
         try:
             initial_position = None
             initial_avg_cost = None
@@ -607,6 +692,9 @@ def main(argv=None):
                     "max_quote_age": args.max_quote_age,
                 },
                 signal_log_path=args.signal_log,
+                manual_orders=args.manual_orders,
+                order_quantity=args.order_quantity,
+                limit_buffer_bps=args.limit_buffer_bps,
             )
         except KeyboardInterrupt:
             print("\nStopped quote watch.")
