@@ -595,11 +595,11 @@ def parse_args(argv):
         default=5.0,
         help="Manual order buffer in basis points: buy above ask, sell below bid.",
     )
-    parser.add_argument("--k", type=float, default=1.2, help="Strategy funnel threshold.")
-    parser.add_argument("--delta", type=int, default=8, help="Strategy momentum window in bars.")
+    parser.add_argument("--k", type=float, default=0.8, help="Strategy funnel threshold.")
+    parser.add_argument("--delta", type=int, default=3, help="Strategy momentum window in bars.")
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
-    parser.add_argument("--lookback-L", type=int, default=60, help="Bounded funnel lookback.")
-    parser.add_argument("--trail-a", type=float, default=0.04, help="Trailing-profit log drawdown threshold.")
+    parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
+    parser.add_argument("--trail-a", type=float, default=0.03, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
     parser.add_argument("--drift-q", type=float, default=1e-7, help="Kalman drift process variance.")
     parser.add_argument(
