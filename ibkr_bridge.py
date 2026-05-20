@@ -1,11 +1,11 @@
 """
-Read-only IBKR TWS bridge for the trading project.
+IBKR TWS bridge for the trading project.
 
 Version 1 goal:
     Connect to a local TWS / IB Gateway session and print bid, ask, and mid.
 
-This script does not place orders. It is intentionally conservative so we can
-verify the local TWS API connection before wiring in strategy execution.
+By default this script is read-only. It places orders only when explicitly
+started with --manual-orders or --auto-orders.
 
 Setup:
     1. Open TWS Demo/Paper.
@@ -23,6 +23,7 @@ Example:
     python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy
     python3 ibkr_bridge.py --positions
     python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders
+    python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position --auto-orders --regular-hours-only --max-spread-bps 20 --max-quote-age 10
 """
 
 from __future__ import annotations
@@ -125,12 +126,12 @@ def _limit_price_for_signal(signal, limit_buffer_bps):
     return None
 
 
-def _manual_confirm_order(ib, contract, signal, quantity, limit_buffer_bps):
-    """Prompt before placing a paper/live limit order."""
+def _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps):
+    """Submit a limit order for a WOULD BUY / WOULD SELL signal."""
     if signal.signal not in ("WOULD BUY", "WOULD SELL"):
         return None
     if signal.blocked:
-        print(f"Manual order skipped: signal blocked by {signal.block_reason}.")
+        print(f"Order skipped: signal blocked by {signal.block_reason}.")
         return None
     limit_price = _limit_price_for_signal(signal, limit_buffer_bps)
     if limit_price is None:
@@ -138,20 +139,7 @@ def _manual_confirm_order(ib, contract, signal, quantity, limit_buffer_bps):
     action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
     quantity = int(quantity)
     if quantity <= 0:
-        print("Manual order skipped: quantity must be positive.")
-        return None
-
-    print("")
-    print("Manual order confirmation")
-    print(f"Signal: {signal.signal}")
-    print(f"Symbol: {signal.symbol}")
-    print(f"Action: {action}")
-    print(f"Quantity: {quantity}")
-    print(f"Reference bid/ask: {_format_price(signal.close_bid)} / {_format_price(signal.close_ask)}")
-    print(f"Suggested LMT price: {_format_price(limit_price)}")
-    answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
-    if answer != "y":
-        print("Order skipped by user.")
+        print("Order skipped: quantity must be positive.")
         return None
 
     from ib_insync import LimitOrder
@@ -165,6 +153,48 @@ def _manual_confirm_order(ib, contract, signal, quantity, limit_buffer_bps):
         f"status={trade.orderStatus.status}"
     )
     return trade
+
+
+def _handle_order_signal(
+    ib,
+    contract,
+    signal,
+    quantity,
+    limit_buffer_bps,
+    auto_orders=False,
+):
+    """Prompt or auto-submit when the strategy emits an actionable signal."""
+    if signal.signal not in ("WOULD BUY", "WOULD SELL"):
+        return None
+    if signal.blocked:
+        print(f"Order skipped: signal blocked by {signal.block_reason}.")
+        return None
+    limit_price = _limit_price_for_signal(signal, limit_buffer_bps)
+    if limit_price is None:
+        return None
+    action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
+    quantity = int(quantity)
+    if quantity <= 0:
+        print("Order skipped: quantity must be positive.")
+        return None
+
+    print("")
+    print("Order signal")
+    print(f"Signal: {signal.signal}")
+    print(f"Symbol: {signal.symbol}")
+    print(f"Action: {action}")
+    print(f"Quantity: {quantity}")
+    print(f"Reference bid/ask: {_format_price(signal.close_bid)} / {_format_price(signal.close_ask)}")
+    print(f"Suggested LMT price: {_format_price(limit_price)}")
+    if auto_orders:
+        print("Auto-order mode is ON: submitting without y/n confirmation.")
+        return _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps)
+
+    answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
+    if answer == "y":
+        return _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps)
+    print("Order skipped by user.")
+    return None
 
 
 def _quote_from_ticker(ticker, symbol, market_data_type):
@@ -325,10 +355,12 @@ def watch_stock_quote(
     strategy_kwargs=None,
     signal_log_path=None,
     manual_orders=False,
-    order_quantity=1,
+    auto_orders=False,
+    order_quantity=4,
     limit_buffer_bps=5.0,
+    stop_after_order=True,
 ):
-    """Continuously print read-only Level 1 quotes from TWS."""
+    """Continuously print Level 1 quotes from TWS and optionally act on signals."""
     try:
         from ib_insync import IB, Stock
     except ImportError as exc:
@@ -375,7 +407,7 @@ def watch_stock_quote(
             host,
             port,
             clientId=client_id,
-            readonly=not manual_orders,
+            readonly=not (manual_orders or auto_orders),
             timeout=timeout,
         )
         ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
@@ -417,14 +449,18 @@ def watch_stock_quote(
                     if signal_log_writer:
                         signal_log_writer.writerow(signal_to_dict(signal))
                         signal_log_file.flush()
-                    if manual_orders:
-                        _manual_confirm_order(
+                    if manual_orders or auto_orders:
+                        trade = _handle_order_signal(
                             ib,
                             contract,
                             signal,
                             quantity=order_quantity,
                             limit_buffer_bps=limit_buffer_bps,
+                            auto_orders=auto_orders,
                         )
+                        if trade is not None and auto_orders and stop_after_order:
+                            print("Stopping after submitted auto order.")
+                            break
             if log_writer:
                 log_writer.writerow(row.__dict__)
                 log_file.flush()
@@ -519,7 +555,7 @@ def parse_args(argv):
     parser = argparse.ArgumentParser(
         description=(
             "Read bid/ask/mid from a local TWS demo/paper session. "
-            "This script is read-only and never places orders."
+            "Orders are placed only with --manual-orders or --auto-orders."
         ),
         epilog=(
             "Examples:\n"
@@ -530,6 +566,7 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position --auto-orders --regular-hours-only --max-spread-bps 20 --max-quote-age 10\n"
             "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -588,16 +625,38 @@ def parse_args(argv):
         action="store_true",
         help="Prompt before submitting a limit order when dry-run emits WOULD BUY/WOULD SELL.",
     )
-    parser.add_argument("--order-quantity", type=int, default=1, help="Manual order quantity.")
+    parser.add_argument(
+        "--auto-orders",
+        action="store_true",
+        help="Submit a limit order automatically when dry-run emits WOULD BUY/WOULD SELL.",
+    )
+    parser.add_argument(
+        "--keep-running-after-order",
+        action="store_true",
+        help="Keep watching after an auto order is submitted. Default stops after one auto order.",
+    )
+    parser.add_argument("--order-quantity", type=int, default=4, help="Order quantity.")
     parser.add_argument(
         "--limit-buffer-bps",
         type=float,
         default=5.0,
-        help="Manual order buffer in basis points: buy above ask, sell below bid.",
+        help="Order buffer in basis points: buy above ask, sell below bid.",
     )
     parser.add_argument("--k", type=float, default=0.8, help="Strategy funnel threshold.")
     parser.add_argument("--delta", type=int, default=3, help="Strategy momentum window in bars.")
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
+    parser.add_argument(
+        "--fixed-buy-fee",
+        type=float,
+        default=1.0,
+        help="Fixed dollar buy commission folded into the strategy cost h.",
+    )
+    parser.add_argument(
+        "--fixed-sell-fee",
+        type=float,
+        default=1.03,
+        help="Fixed dollar sell commission folded into the strategy cost h.",
+    )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
     parser.add_argument("--trail-a", type=float, default=0.03, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
@@ -638,6 +697,26 @@ def main(argv=None):
         if args.manual_orders and not args.dry_run_strategy:
             print("--manual-orders requires --dry-run-strategy.")
             return 1
+        if args.auto_orders and not args.dry_run_strategy:
+            print("--auto-orders requires --dry-run-strategy.")
+            return 1
+        if args.manual_orders and args.auto_orders:
+            print("Choose only one: --manual-orders or --auto-orders.")
+            return 1
+        if args.auto_orders:
+            missing = []
+            if not args.use_account_position:
+                missing.append("--use-account-position")
+            if not args.regular_hours_only:
+                missing.append("--regular-hours-only")
+            if args.max_spread_bps is None:
+                missing.append("--max-spread-bps")
+            if args.max_quote_age is None:
+                missing.append("--max-quote-age")
+            if missing:
+                print("--auto-orders requires these safety options:")
+                print("  " + " ".join(missing))
+                return 1
         try:
             initial_position = None
             initial_avg_cost = None
@@ -690,11 +769,16 @@ def main(argv=None):
                     "regular_hours_only": args.regular_hours_only,
                     "max_spread_bps": args.max_spread_bps,
                     "max_quote_age": args.max_quote_age,
+                    "fixed_buy_fee": args.fixed_buy_fee,
+                    "fixed_sell_fee": args.fixed_sell_fee,
+                    "order_quantity": args.order_quantity,
                 },
                 signal_log_path=args.signal_log,
                 manual_orders=args.manual_orders,
+                auto_orders=args.auto_orders,
                 order_quantity=args.order_quantity,
                 limit_buffer_bps=args.limit_buffer_bps,
+                stop_after_order=not args.keep_running_after_order,
             )
         except KeyboardInterrupt:
             print("\nStopped quote watch.")
@@ -703,7 +787,10 @@ def main(argv=None):
             print("IBKR bridge watch failed.")
             print(str(exc))
             return 1
-        print("No orders were placed.")
+        if args.manual_orders or args.auto_orders:
+            print("Watch ended.")
+        else:
+            print("No orders were placed.")
         return 0
 
     try:

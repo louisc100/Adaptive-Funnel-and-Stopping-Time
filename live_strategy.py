@@ -126,6 +126,9 @@ class LiveDryRunStrategy:
         max_spread_bps=None,
         max_quote_age=None,
         timezone="America/New_York",
+        fixed_buy_fee=0.0,
+        fixed_sell_fee=0.0,
+        order_quantity=1,
     ):
         self.symbol = symbol.upper()
         self.k = float(k)
@@ -143,6 +146,9 @@ class LiveDryRunStrategy:
         self.max_spread_bps = None if max_spread_bps is None else float(max_spread_bps)
         self.max_quote_age = None if max_quote_age is None else float(max_quote_age)
         self.timezone = ZoneInfo(timezone)
+        self.fixed_buy_fee = max(float(fixed_buy_fee), 0.0)
+        self.fixed_sell_fee = max(float(fixed_sell_fee), 0.0)
+        self.order_quantity = max(int(order_quantity), 1)
         self.bars = []
 
     def on_bar(self, bar, quote_age_seconds=None):
@@ -170,13 +176,14 @@ class LiveDryRunStrategy:
         mids = np.asarray([b.close_mid for b in self.bars], dtype=float)
         lp = np.log(mids)
         sigma_seed = estimate_sigma_seed(lp)
+        effective_cost = self._effective_proportional_cost(bar.close_mid)
         data = run_strategy_on_log_prices(
             lp,
             k=self.k,
             delta=min(self.delta, max(1, len(lp) - 2)),
             sigma_seed=sigma_seed,
-            c_buy=self.cost,
-            c_sell=self.cost,
+            c_buy=effective_cost["buy"],
+            c_sell=effective_cost["sell"],
             drift_process_var=self.drift_process_var,
             max_funnel_lookback=self.max_funnel_lookback,
             trailing_stop=self.trailing_stop,
@@ -271,6 +278,13 @@ class LiveDryRunStrategy:
         ):
             return True, "STALE_QUOTE"
         return False, ""
+
+    def _effective_proportional_cost(self, reference_price):
+        notional = max(float(reference_price) * self.order_quantity, 1e-12)
+        return {
+            "buy": self.cost + self.fixed_buy_fee / notional,
+            "sell": self.cost + self.fixed_sell_fee / notional,
+        }
 
     def _is_regular_hours(self, timestamp):
         dt = datetime.fromisoformat(timestamp)
