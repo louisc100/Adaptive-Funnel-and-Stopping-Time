@@ -20,6 +20,7 @@ Example:
     python3 ibkr_bridge.py --preset apple
     python3 ibkr_bridge.py --preset spy --market-data-type delayed
     python3 ibkr_bridge.py --preset spy --watch --duration 30
+    python3 ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy
 """
 
 from __future__ import annotations
@@ -230,6 +231,9 @@ def watch_stock_quote(
     interval=5.0,
     duration=None,
     log_path=None,
+    dry_run_strategy=False,
+    bar_seconds=60,
+    strategy_kwargs=None,
 ):
     """Continuously print read-only Level 1 quotes from TWS."""
     try:
@@ -256,6 +260,17 @@ def watch_stock_quote(
 
     log_file = None
     log_writer = None
+    bar_builder = None
+    strategy = None
+    if dry_run_strategy:
+        from live_strategy import (
+            LiveDryRunStrategy,
+            MidBarBuilder,
+            print_strategy_signal,
+        )
+        bar_builder = MidBarBuilder(bar_seconds=bar_seconds)
+        strategy = LiveDryRunStrategy(symbol=symbol, **(strategy_kwargs or {}))
+
     ib = IB()
     try:
         ib.connect(host, port, clientId=client_id, readonly=True, timeout=timeout)
@@ -278,6 +293,11 @@ def watch_stock_quote(
             ib.sleep(interval)
             row = _quote_from_ticker(ticker, symbol, market_data_type)
             _print_quote_row(row)
+            if dry_run_strategy:
+                bar = bar_builder.update(row)
+                if bar is not None:
+                    signal = strategy.on_bar(bar)
+                    print_strategy_signal(signal)
             if log_writer:
                 log_writer.writerow(row.__dict__)
                 log_file.flush()
@@ -305,7 +325,8 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --preset apple\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol AAPL --port 7497 --market-data-type delayed\n"
             "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed\n"
-            "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30"
+            "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -325,6 +346,19 @@ def parse_args(argv):
     parser.add_argument("--duration", type=float, default=None, help="Optional watch-mode duration in seconds.")
     parser.add_argument("--log-csv", default=None, help="Optional CSV path for watch-mode quote logging.")
     parser.add_argument(
+        "--dry-run-strategy",
+        action="store_true",
+        help="Build mid-price bars and print HOLD/WOULD BUY/WOULD SELL. No orders.",
+    )
+    parser.add_argument("--bar-seconds", type=float, default=60.0, help="Dry-run strategy bar size in seconds.")
+    parser.add_argument("--k", type=float, default=1.2, help="Strategy funnel threshold.")
+    parser.add_argument("--delta", type=int, default=8, help="Strategy momentum window in bars.")
+    parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
+    parser.add_argument("--lookback-L", type=int, default=60, help="Bounded funnel lookback.")
+    parser.add_argument("--trail-a", type=float, default=0.04, help="Trailing-profit log drawdown threshold.")
+    parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
+    parser.add_argument("--drift-q", type=float, default=1e-7, help="Kalman drift process variance.")
+    parser.add_argument(
         "--market-data-type",
         choices=tuple(MARKET_DATA_TYPES),
         default=DEFAULT_MARKET_DATA_TYPE,
@@ -339,7 +373,7 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     symbol = args.symbol or SYMBOL_PRESETS[args.preset]
-    if args.watch:
+    if args.watch or args.dry_run_strategy:
         try:
             print(
                 "Requesting "
@@ -356,6 +390,17 @@ def main(argv=None):
                 interval=args.interval,
                 duration=args.duration,
                 log_path=args.log_csv,
+                dry_run_strategy=args.dry_run_strategy,
+                bar_seconds=args.bar_seconds,
+                strategy_kwargs={
+                    "k": args.k,
+                    "delta": args.delta,
+                    "cost": args.cost,
+                    "drift_process_var": args.drift_q,
+                    "max_funnel_lookback": args.lookback_L,
+                    "trailing_stop": args.trail_a,
+                    "trend_entry_z": args.z_trend,
+                },
             )
         except KeyboardInterrupt:
             print("\nStopped quote watch.")
