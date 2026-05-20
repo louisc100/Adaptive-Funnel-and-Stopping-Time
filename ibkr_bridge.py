@@ -171,6 +171,36 @@ def _open_quote_log(path):
     return file_obj, writer
 
 
+def _open_signal_log(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    exists = path.exists()
+    file_obj = path.open("a", newline="")
+    writer = csv.DictWriter(
+        file_obj,
+        fieldnames=[
+            "timestamp",
+            "symbol",
+            "bars",
+            "close_mid",
+            "close_bid",
+            "close_ask",
+            "position",
+            "signal",
+            "z",
+            "realized_w",
+            "mtm_w",
+            "trades",
+            "blocked",
+            "block_reason",
+            "note",
+        ],
+    )
+    if not exists:
+        writer.writeheader()
+    return file_obj, writer
+
+
 def fetch_stock_quote(
     symbol=DEFAULT_SYMBOL,
     host=DEFAULT_HOST,
@@ -241,6 +271,7 @@ def watch_stock_quote(
     dry_run_strategy=False,
     bar_seconds=60,
     strategy_kwargs=None,
+    signal_log_path=None,
 ):
     """Continuously print read-only Level 1 quotes from TWS."""
     try:
@@ -267,6 +298,8 @@ def watch_stock_quote(
 
     log_file = None
     log_writer = None
+    signal_log_file = None
+    signal_log_writer = None
     bar_builder = None
     strategy = None
     if dry_run_strategy:
@@ -274,9 +307,12 @@ def watch_stock_quote(
             LiveDryRunStrategy,
             MidBarBuilder,
             print_strategy_signal,
+            signal_to_dict,
         )
         bar_builder = MidBarBuilder(bar_seconds=bar_seconds)
         strategy = LiveDryRunStrategy(symbol=symbol, **(strategy_kwargs or {}))
+        if signal_log_path:
+            signal_log_file, signal_log_writer = _open_signal_log(signal_log_path)
 
     ib = IB()
     try:
@@ -295,16 +331,31 @@ def watch_stock_quote(
         )
         if log_path:
             print(f"Logging to {log_path}")
+        if signal_log_path:
+            print(f"Logging strategy signals to {signal_log_path}")
         start = time.monotonic()
+        last_good_quote_monotonic = None
         while True:
             ib.sleep(interval)
             row = _quote_from_ticker(ticker, symbol, market_data_type)
+            if row.mid is not None:
+                last_good_quote_monotonic = time.monotonic()
+            quote_age_seconds = (
+                None if last_good_quote_monotonic is None
+                else time.monotonic() - last_good_quote_monotonic
+            )
             _print_quote_row(row)
             if dry_run_strategy:
                 bar = bar_builder.update(row)
                 if bar is not None:
-                    signal = strategy.on_bar(bar)
+                    signal = strategy.on_bar(
+                        bar,
+                        quote_age_seconds=quote_age_seconds,
+                    )
                     print_strategy_signal(signal)
+                    if signal_log_writer:
+                        signal_log_writer.writerow(signal_to_dict(signal))
+                        signal_log_file.flush()
             if log_writer:
                 log_writer.writerow(row.__dict__)
                 log_file.flush()
@@ -313,6 +364,8 @@ def watch_stock_quote(
     finally:
         if log_file:
             log_file.close()
+        if signal_log_file:
+            signal_log_file.close()
         if ib.isConnected():
             try:
                 ib.cancelMktData(contract)
@@ -381,6 +434,18 @@ def print_positions(positions):
         )
 
 
+def find_position(positions, symbol):
+    """Return the first matching stock position for a symbol, or None."""
+    symbol = symbol.upper()
+    for position in positions:
+        if (
+            position["symbol"].upper() == symbol
+            and position["sec_type"].upper() == "STK"
+        ):
+            return position
+    return None
+
+
 def parse_args(argv):
     parser = argparse.ArgumentParser(
         description=(
@@ -394,6 +459,7 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --preset spy --market-data-type delayed\n"
             "  ./venv/bin/python ibkr_bridge.py --preset spy --watch --duration 30\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position\n"
             "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -419,7 +485,34 @@ def parse_args(argv):
         action="store_true",
         help="Build mid-price bars and print HOLD/WOULD BUY/WOULD SELL. No orders.",
     )
+    parser.add_argument(
+        "--use-account-position",
+        action="store_true",
+        help="For dry-run strategy, initialize CASH/LONG from the current TWS account position.",
+    )
     parser.add_argument("--bar-seconds", type=float, default=60.0, help="Dry-run strategy bar size in seconds.")
+    parser.add_argument(
+        "--regular-hours-only",
+        action="store_true",
+        help="Block dry-run trade signals outside regular US stock market hours.",
+    )
+    parser.add_argument(
+        "--max-spread-bps",
+        type=float,
+        default=None,
+        help="Block dry-run trade signals when average bar spread exceeds this many basis points.",
+    )
+    parser.add_argument(
+        "--max-quote-age",
+        type=float,
+        default=None,
+        help="Block dry-run trade signals when the latest usable quote is older than this many seconds.",
+    )
+    parser.add_argument(
+        "--signal-log",
+        default=None,
+        help="Optional CSV path for dry-run strategy signals.",
+    )
     parser.add_argument("--k", type=float, default=1.2, help="Strategy funnel threshold.")
     parser.add_argument("--delta", type=int, default=8, help="Strategy momentum window in bars.")
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
@@ -461,6 +554,27 @@ def main(argv=None):
 
     if args.watch or args.dry_run_strategy:
         try:
+            initial_position = None
+            initial_avg_cost = None
+            if args.dry_run_strategy and args.use_account_position:
+                positions = fetch_positions(
+                    host=args.host,
+                    port=args.port,
+                    client_id=args.client_id + 1000,
+                    timeout=args.timeout,
+                )
+                matched_position = find_position(positions, symbol)
+                if matched_position:
+                    initial_position = matched_position["position"]
+                    initial_avg_cost = matched_position["avg_cost"]
+                else:
+                    initial_position = 0.0
+                    initial_avg_cost = None
+                print(
+                    "Account-aware dry run: "
+                    f"{symbol} position={_format_quantity(initial_position)}, "
+                    f"avg_cost={_format_price(initial_avg_cost)}"
+                )
             print(
                 "Requesting "
                 f"{args.market_data_type} market data "
@@ -486,7 +600,13 @@ def main(argv=None):
                     "max_funnel_lookback": args.lookback_L,
                     "trailing_stop": args.trail_a,
                     "trend_entry_z": args.z_trend,
+                    "initial_position": initial_position,
+                    "initial_avg_cost": initial_avg_cost,
+                    "regular_hours_only": args.regular_hours_only,
+                    "max_spread_bps": args.max_spread_bps,
+                    "max_quote_age": args.max_quote_age,
                 },
+                signal_log_path=args.signal_log,
             )
         except KeyboardInterrupt:
             print("\nStopped quote watch.")

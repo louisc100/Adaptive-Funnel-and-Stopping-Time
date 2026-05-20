@@ -11,7 +11,8 @@ No orders are placed here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import numpy as np
 
@@ -45,6 +46,8 @@ class StrategySignal:
     mtm_w: float
     trades: int
     note: str = ""
+    blocked: bool = False
+    block_reason: str = ""
 
 
 class MidBarBuilder:
@@ -117,6 +120,12 @@ class LiveDryRunStrategy:
         trend_entry_z=0.35,
         execution_spread=0.0,
         execution_slippage=0.0,
+        initial_position=None,
+        initial_avg_cost=None,
+        regular_hours_only=False,
+        max_spread_bps=None,
+        max_quote_age=None,
+        timezone="America/New_York",
     ):
         self.symbol = symbol.upper()
         self.k = float(k)
@@ -128,9 +137,16 @@ class LiveDryRunStrategy:
         self.trend_entry_z = float(trend_entry_z)
         self.execution_spread = float(execution_spread)
         self.execution_slippage = float(execution_slippage)
+        self.initial_position = None if initial_position is None else float(initial_position)
+        self.initial_avg_cost = None if initial_avg_cost is None else float(initial_avg_cost)
+        self.regular_hours_only = bool(regular_hours_only)
+        self.max_spread_bps = None if max_spread_bps is None else float(max_spread_bps)
+        self.max_quote_age = None if max_quote_age is None else float(max_quote_age)
+        self.timezone = ZoneInfo(timezone)
         self.bars = []
 
-    def on_bar(self, bar):
+    def on_bar(self, bar, quote_age_seconds=None):
+        blocked, block_reason = self._check_guards(bar, quote_age_seconds)
         self.bars.append(bar)
         if len(self.bars) < 2:
             return StrategySignal(
@@ -147,6 +163,8 @@ class LiveDryRunStrategy:
                 mtm_w=1000.0,
                 trades=0,
                 note="Need at least two completed bars.",
+                blocked=blocked,
+                block_reason=block_reason,
             )
 
         mids = np.asarray([b.close_mid for b in self.bars], dtype=float)
@@ -170,19 +188,52 @@ class LiveDryRunStrategy:
         t = data["N"]
         buy_now = t in data["buy_times"]
         sell_now = t in data["sell_times"]
-        position = "LONG" if bool(data["holding"][t]) else "CASH"
-        if buy_now and t == 1:
-            signal = "INIT LONG"
-            note = "Research strategy starts with an initial reference position."
-        elif buy_now:
-            signal = "WOULD BUY"
-            note = "Dry run only; no order placed."
-        elif sell_now:
-            signal = "WOULD SELL"
-            note = "Dry run only; no order placed."
+        research_position = "LONG" if bool(data["holding"][t]) else "CASH"
+        if self.initial_position is None:
+            position = research_position
+            if buy_now and t == 1:
+                signal = "INIT LONG"
+                note = "Research strategy starts with an initial reference position."
+            elif buy_now:
+                signal = "WOULD BUY"
+                note = "Dry run only; no order placed."
+            elif sell_now:
+                signal = "WOULD SELL"
+                note = "Dry run only; no order placed."
+            else:
+                signal = "HOLD"
+                note = ""
+        elif self.initial_position > 0:
+            position = "LONG"
+            if blocked:
+                signal = f"BLOCKED {block_reason}"
+                note = (
+                    f"Account-aware dry run; current account holds "
+                    f"{self.initial_position:g} shares."
+                )
+            elif sell_now:
+                signal = "WOULD SELL"
+                note = (
+                    f"Account-aware dry run; current account holds "
+                    f"{self.initial_position:g} shares."
+                )
+            else:
+                signal = "HOLD LONG"
+                note = (
+                    f"Account-aware dry run; current account holds "
+                    f"{self.initial_position:g} shares."
+                )
         else:
-            signal = "HOLD"
-            note = ""
+            position = "CASH"
+            if blocked:
+                signal = f"BLOCKED {block_reason}"
+                note = "Account-aware dry run; current account has no position."
+            elif buy_now and t != 1:
+                signal = "WOULD BUY"
+                note = "Account-aware dry run; current account has no position."
+            else:
+                signal = "HOLD CASH"
+                note = "Account-aware dry run; current account has no position."
 
         metrics = summarize_simulation(data, t)
         z = data["Zsig"][t]
@@ -200,7 +251,35 @@ class LiveDryRunStrategy:
             mtm_w=float(data["portfolio_w"][t]),
             trades=int(metrics["completed_trades"]),
             note=note,
+            blocked=blocked,
+            block_reason=block_reason,
         )
+
+    def _check_guards(self, bar, quote_age_seconds):
+        if self.regular_hours_only and not self._is_regular_hours(bar.timestamp):
+            return True, "MARKET_CLOSED"
+        if (
+            self.max_spread_bps is not None
+            and not np.isnan(bar.avg_spread_bps)
+            and bar.avg_spread_bps > self.max_spread_bps
+        ):
+            return True, "WIDE_SPREAD"
+        if (
+            self.max_quote_age is not None
+            and quote_age_seconds is not None
+            and quote_age_seconds > self.max_quote_age
+        ):
+            return True, "STALE_QUOTE"
+        return False, ""
+
+    def _is_regular_hours(self, timestamp):
+        dt = datetime.fromisoformat(timestamp)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("America/Vancouver"))
+        eastern = dt.astimezone(self.timezone)
+        if eastern.weekday() >= 5:
+            return False
+        return time(9, 30) <= eastern.time() <= time(16, 0)
 
 
 def print_strategy_signal(signal):
@@ -218,3 +297,23 @@ def print_strategy_signal(signal):
         f"MtM {signal.mtm_w:>9.2f} | "
         f"trades {signal.trades}{note}"
     )
+
+
+def signal_to_dict(signal):
+    return {
+        "timestamp": signal.timestamp,
+        "symbol": signal.symbol,
+        "bars": signal.bars,
+        "close_mid": signal.close_mid,
+        "close_bid": signal.close_bid,
+        "close_ask": signal.close_ask,
+        "position": signal.position,
+        "signal": signal.signal,
+        "z": signal.z,
+        "realized_w": signal.realized_w,
+        "mtm_w": signal.mtm_w,
+        "trades": signal.trades,
+        "blocked": signal.blocked,
+        "block_reason": signal.block_reason,
+        "note": signal.note,
+    }
