@@ -498,6 +498,48 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     if sell_x:
         ax_p.scatter(sell_x, [prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Sell")
 
+    submitted_markers = getattr(strategy, "submitted_markers", [])
+    submitted_buys = [
+        m for m in submitted_markers
+        if (
+            m.get("action") == "BUY"
+            and m.get("price") is not None
+            and start <= int(m.get("index", -1)) < t_end
+        )
+    ]
+    submitted_sells = [
+        m for m in submitted_markers
+        if (
+            m.get("action") == "SELL"
+            and m.get("price") is not None
+            and start <= int(m.get("index", -1)) < t_end
+        )
+    ]
+    if submitted_buys:
+        ax_p.scatter(
+            [int(m["index"]) for m in submitted_buys],
+            [float(m["price"]) for m in submitted_buys],
+            marker="^",
+            s=95,
+            color="#16a34a",
+            edgecolors="#f8fafc",
+            linewidths=0.8,
+            label="Submitted buy",
+            zorder=6,
+        )
+    if submitted_sells:
+        ax_p.scatter(
+            [int(m["index"]) for m in submitted_sells],
+            [float(m["price"]) for m in submitted_sells],
+            marker="v",
+            s=95,
+            color="#dc2626",
+            edgecolors="#f8fafc",
+            linewidths=0.8,
+            label="Submitted sell",
+            zorder=6,
+        )
+
     current_color = "#22c55e" if holding[int(data["N"])] else "#f97316"
     ax_p.scatter([int(data["N"])], [prices[int(data["N"])]], s=65, color=current_color, zorder=5)
     ax_p.set_ylabel("Price", color="#d6deeb")
@@ -710,6 +752,13 @@ def watch_stock_quote(
                         )
                         if trade is not None:
                             _sync_strategy_after_order(strategy, trade)
+                            if live_plot_path and getattr(strategy, "latest_data", None) is not None:
+                                _save_live_strategy_plot(
+                                    strategy,
+                                    signal,
+                                    live_plot_path,
+                                    window_bars=plot_window_bars,
+                                )
                         if trade is not None and auto_orders and stop_after_order:
                             print("Stopping after submitted auto order.")
                             break

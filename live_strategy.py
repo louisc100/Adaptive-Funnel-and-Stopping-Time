@@ -154,6 +154,7 @@ class LiveDryRunStrategy:
         self._initial_buy_emitted = False
         self.bars = []
         self.latest_data = None
+        self.submitted_markers = []
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -315,7 +316,23 @@ class LiveDryRunStrategy:
             # A submitted buy creates a fresh tau_b anchor for subsequent sell logic.
             self.bars = []
             self.latest_data = None
+            self.submitted_markers = [{
+                "action": "BUY",
+                "index": 1,
+                "price": price,
+            }]
         elif action == "SELL":
+            marker_index = None
+            if self.latest_data is not None:
+                marker_index = int(self.latest_data["N"])
+            elif self.bars:
+                marker_index = len(self.bars) - 1
+            if marker_index is not None:
+                self.submitted_markers.append({
+                    "action": "SELL",
+                    "index": marker_index,
+                    "price": price,
+                })
             new_position = max(current_position - quantity, 0.0)
             self.initial_position = new_position
             if new_position <= 0:
