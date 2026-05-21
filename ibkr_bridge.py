@@ -33,8 +33,9 @@ import csv
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as day_time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -59,6 +60,9 @@ MARKET_DATA_TYPES = {
     "delayed": 3,
     "delayed-frozen": 4,
 }
+MARKET_TZ = ZoneInfo("America/New_York")
+MARKET_OPEN = day_time(9, 30)
+MARKET_CLOSE = day_time(16, 0)
 
 
 @dataclass
@@ -106,6 +110,52 @@ def _format_quantity(value):
 
 def _format_bps(value):
     return "n/a" if value is None else f"{value:.2f}"
+
+
+def _regular_market_window(now=None):
+    """Return today's regular US equity market open/close in Eastern time."""
+    now = datetime.now(MARKET_TZ) if now is None else now.astimezone(MARKET_TZ)
+    open_dt = datetime.combine(now.date(), MARKET_OPEN, tzinfo=MARKET_TZ)
+    close_dt = datetime.combine(now.date(), MARKET_CLOSE, tzinfo=MARKET_TZ)
+    return open_dt, close_dt
+
+
+def _is_regular_market_open(now=None):
+    now = datetime.now(MARKET_TZ) if now is None else now.astimezone(MARKET_TZ)
+    if now.weekday() >= 5:
+        return False
+    open_dt, close_dt = _regular_market_window(now)
+    return open_dt <= now <= close_dt
+
+
+def _next_regular_market_open(now=None):
+    """Return the next regular US equity market open, ignoring holidays."""
+    now = datetime.now(MARKET_TZ) if now is None else now.astimezone(MARKET_TZ)
+    candidate = now
+    while True:
+        open_dt, _ = _regular_market_window(candidate)
+        if candidate.weekday() < 5 and candidate < open_dt:
+            return open_dt
+        candidate = datetime.combine(
+            candidate.date() + timedelta(days=1),
+            day_time(0, 0),
+            tzinfo=MARKET_TZ,
+        )
+
+
+def wait_for_regular_market_open(check_seconds=60):
+    """Sleep until regular US stock-market hours begin."""
+    check_seconds = max(float(check_seconds), 5.0)
+    while not _is_regular_market_open():
+        now = datetime.now(MARKET_TZ)
+        next_open = _next_regular_market_open(now)
+        wait_seconds = max((next_open - now).total_seconds(), 0.0)
+        print(
+            "Market is closed. Waiting until regular US market open: "
+            f"{next_open.isoformat(timespec='minutes')} ET "
+            f"(about {wait_seconds / 3600.0:.2f} hours)."
+        )
+        time.sleep(min(check_seconds, wait_seconds if wait_seconds > 0 else check_seconds))
 
 
 def _first_price(*values):
@@ -673,6 +723,17 @@ def parse_args(argv):
     parser.add_argument("--duration", type=float, default=None, help="Optional watch-mode duration in seconds.")
     parser.add_argument("--log-csv", default=None, help="Optional CSV path for watch-mode quote logging.")
     parser.add_argument(
+        "--wait-for-open",
+        action="store_true",
+        help="Sleep until regular US stock-market hours before connecting/running.",
+    )
+    parser.add_argument(
+        "--wait-check-seconds",
+        type=float,
+        default=60.0,
+        help="How often --wait-for-open checks the clock.",
+    )
+    parser.add_argument(
         "--dry-run-strategy",
         action="store_true",
         help="Build mid-price bars and print HOLD/WOULD BUY/WOULD SELL. No orders.",
@@ -772,6 +833,12 @@ def parse_args(argv):
 def main(argv=None):
     args = parse_args(sys.argv[1:] if argv is None else argv)
     symbol = args.symbol or SYMBOL_PRESETS[args.preset]
+    if args.wait_for_open:
+        try:
+            wait_for_regular_market_open(check_seconds=args.wait_check_seconds)
+        except KeyboardInterrupt:
+            print("\nStopped while waiting for market open.")
+            return 0
     if args.positions:
         try:
             positions = fetch_positions(
