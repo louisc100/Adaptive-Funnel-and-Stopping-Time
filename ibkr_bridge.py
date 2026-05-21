@@ -247,6 +247,101 @@ def _handle_order_signal(
     return None
 
 
+def place_direct_limit_order(
+    symbol=DEFAULT_SYMBOL,
+    action="BUY",
+    quantity=1,
+    limit_price=None,
+    limit_buffer_bps=5.0,
+    host=DEFAULT_HOST,
+    port=DEFAULT_PORT,
+    client_id=DEFAULT_CLIENT_ID,
+    timeout=8.0,
+    market_data_type=DEFAULT_MARKET_DATA_TYPE,
+    confirm_order=False,
+):
+    """Place one explicit limit order, or preview it without --confirm-order."""
+    try:
+        from ib_insync import IB, LimitOrder, Stock
+    except ImportError as exc:
+        raise RuntimeError(
+            "Missing dependency: ib_insync.\n"
+            "Install it inside your project environment with:\n"
+            "    pip install ib_insync\n"
+            "or, if using your venv explicitly:\n"
+            "    ./venv/bin/python -m pip install ib_insync"
+        ) from exc
+
+    symbol = symbol.upper().strip()
+    action = action.upper().strip()
+    quantity = int(quantity)
+    if action not in ("BUY", "SELL"):
+        raise ValueError("--place-order must be BUY or SELL.")
+    if quantity <= 0:
+        raise ValueError("--order-quantity must be positive.")
+    if market_data_type not in MARKET_DATA_TYPES:
+        raise ValueError(
+            "market_data_type must be one of: "
+            + ", ".join(MARKET_DATA_TYPES)
+        )
+
+    ib = IB()
+    try:
+        ib.connect(host, port, clientId=client_id, readonly=False, timeout=timeout)
+        ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
+        ib.sleep(0.5)
+        contract = Stock(symbol, "SMART", "USD")
+        ib.qualifyContracts(contract)
+
+        row = None
+        if limit_price is None:
+            ticker = ib.reqMktData(contract, "", snapshot=False, regulatorySnapshot=False)
+            ib.sleep(3.0)
+            row = _quote_from_ticker(ticker, symbol, market_data_type)
+            try:
+                ib.cancelMktData(contract)
+            except Exception:
+                pass
+            buffer = max(float(limit_buffer_bps), 0.0) / 10000.0
+            if action == "BUY":
+                if row.ask is None:
+                    raise RuntimeError("Cannot infer BUY limit price because ask is unavailable.")
+                limit_price = row.ask * (1.0 + buffer)
+            else:
+                if row.bid is None:
+                    raise RuntimeError("Cannot infer SELL limit price because bid is unavailable.")
+                limit_price = row.bid * (1.0 - buffer)
+
+        limit_price = round(float(limit_price), 2)
+        print("")
+        print("Direct order preview")
+        print(f"Symbol: {symbol}")
+        print(f"Action: {action}")
+        print(f"Quantity: {quantity}")
+        if row is not None:
+            print(f"Reference bid/ask: {_format_price(row.bid)} / {_format_price(row.ask)}")
+        print(f"Limit price: {_format_price(limit_price)}")
+        print(f"Market data type: {market_data_type}")
+        if not confirm_order:
+            print("")
+            print("No order placed. Add --confirm-order to submit this order.")
+            return None
+
+        order = LimitOrder(action, quantity, limit_price, tif="DAY")
+        trade = ib.placeOrder(contract, order)
+        ib.sleep(1.0)
+        print("")
+        print(
+            "Submitted direct order: "
+            f"{action} {quantity} {symbol} LMT {_format_price(order.lmtPrice)} "
+            f"status={trade.orderStatus.status}"
+        )
+        return trade
+    finally:
+        if ib.isConnected():
+            ib.disconnect()
+
+
 def _quote_from_ticker(ticker, symbol, market_data_type):
     bid = _first_price(ticker.bid, getattr(ticker, "delayedBid", None))
     ask = _first_price(ticker.ask, getattr(ticker, "delayedAsk", None))
@@ -702,6 +797,7 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position --auto-orders --regular-hours-only --max-spread-bps 20 --max-quote-age 10\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --place-order BUY --order-quantity 1 --confirm-order\n"
             "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -718,6 +814,23 @@ def parse_args(argv):
     parser.add_argument("--client-id", type=int, default=DEFAULT_CLIENT_ID, help="Unique API client id.")
     parser.add_argument("--timeout", type=float, default=8.0, help="Connection timeout in seconds.")
     parser.add_argument("--positions", action="store_true", help="Print current account positions and exit.")
+    parser.add_argument(
+        "--place-order",
+        choices=("BUY", "SELL"),
+        default=None,
+        help="Place one explicit limit order. Requires --confirm-order to actually submit.",
+    )
+    parser.add_argument(
+        "--limit-price",
+        type=float,
+        default=None,
+        help="Explicit limit price for --place-order. If omitted, uses ask for BUY or bid for SELL plus --limit-buffer-bps.",
+    )
+    parser.add_argument(
+        "--confirm-order",
+        action="store_true",
+        help="Required to submit --place-order. Without this, the command only previews.",
+    )
     parser.add_argument("--watch", action="store_true", help="Continuously print quotes until stopped.")
     parser.add_argument("--interval", type=float, default=5.0, help="Watch-mode print interval in seconds.")
     parser.add_argument("--duration", type=float, default=None, help="Optional watch-mode duration in seconds.")
@@ -839,6 +952,26 @@ def main(argv=None):
         except KeyboardInterrupt:
             print("\nStopped while waiting for market open.")
             return 0
+    if args.place_order:
+        try:
+            place_direct_limit_order(
+                symbol=symbol,
+                action=args.place_order,
+                quantity=args.order_quantity,
+                limit_price=args.limit_price,
+                limit_buffer_bps=args.limit_buffer_bps,
+                host=args.host,
+                port=args.port,
+                client_id=args.client_id,
+                timeout=args.timeout,
+                market_data_type=args.market_data_type,
+                confirm_order=args.confirm_order,
+            )
+        except Exception as exc:
+            print("IBKR direct order failed.")
+            print(str(exc))
+            return 1
+        return 0
     if args.positions:
         try:
             positions = fetch_positions(
