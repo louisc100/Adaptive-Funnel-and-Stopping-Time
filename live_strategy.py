@@ -129,6 +129,7 @@ class LiveDryRunStrategy:
         fixed_buy_fee=0.0,
         fixed_sell_fee=0.0,
         order_quantity=1,
+        initial_buy_if_cash=False,
     ):
         self.symbol = symbol.upper()
         self.k = float(k)
@@ -149,6 +150,8 @@ class LiveDryRunStrategy:
         self.fixed_buy_fee = max(float(fixed_buy_fee), 0.0)
         self.fixed_sell_fee = max(float(fixed_sell_fee), 0.0)
         self.order_quantity = max(int(order_quantity), 1)
+        self.initial_buy_if_cash = bool(initial_buy_if_cash)
+        self._initial_buy_emitted = False
         self.bars = []
         self.latest_data = None
 
@@ -238,6 +241,13 @@ class LiveDryRunStrategy:
             if blocked:
                 signal = f"BLOCKED {block_reason}"
                 note = "Account-aware dry run; current account has no position."
+            elif self.initial_buy_if_cash and not self._initial_buy_emitted:
+                signal = "WOULD BUY"
+                note = (
+                    "GUI-style initial entry: account is cash, so the live "
+                    "strategy starts by buying once to create tau_b."
+                )
+                self._initial_buy_emitted = True
             elif buy_now and t != 1:
                 signal = "WOULD BUY"
                 note = "Account-aware dry run; current account has no position."
@@ -288,6 +298,28 @@ class LiveDryRunStrategy:
             "buy": self.cost + self.fixed_buy_fee / notional,
             "sell": self.cost + self.fixed_sell_fee / notional,
         }
+
+    def apply_submitted_order(self, action, quantity, price):
+        """Synchronize live strategy state after the bridge submits an order."""
+        action = action.upper()
+        quantity = max(float(quantity), 0.0)
+        price = None if price is None else float(price)
+        current_position = 0.0 if self.initial_position is None else self.initial_position
+
+        if action == "BUY":
+            new_position = current_position + quantity
+            self.initial_position = new_position
+            if price is not None and price > 0:
+                self.initial_avg_cost = price
+            self._initial_buy_emitted = True
+            # A submitted buy creates a fresh tau_b anchor for subsequent sell logic.
+            self.bars = []
+            self.latest_data = None
+        elif action == "SELL":
+            new_position = max(current_position - quantity, 0.0)
+            self.initial_position = new_position
+            if new_position <= 0:
+                self.initial_avg_cost = None
 
     def _bars_for_strategy(self):
         """Add a synthetic entry anchor when TWS reports an existing position."""

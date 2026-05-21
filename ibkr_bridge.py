@@ -247,6 +247,26 @@ def _handle_order_signal(
     return None
 
 
+def _sync_strategy_after_order(strategy, trade):
+    """Update account-aware strategy state after a strategy order is submitted."""
+    if strategy is None or trade is None:
+        return
+    order = getattr(trade, "order", None)
+    if order is None:
+        return
+    action = getattr(order, "action", None)
+    quantity = getattr(order, "totalQuantity", None)
+    limit_price = getattr(order, "lmtPrice", None)
+    if action is None or quantity is None:
+        return
+    if hasattr(strategy, "apply_submitted_order"):
+        strategy.apply_submitted_order(action, quantity, limit_price)
+        print(
+            "Strategy state synced after submitted order: "
+            f"{action} {_format_quantity(quantity)} at anchor {_format_price(limit_price)}."
+        )
+
+
 def place_direct_limit_order(
     symbol=DEFAULT_SYMBOL,
     action="BUY",
@@ -688,6 +708,8 @@ def watch_stock_quote(
                             limit_buffer_bps=limit_buffer_bps,
                             auto_orders=auto_orders,
                         )
+                        if trade is not None:
+                            _sync_strategy_after_order(strategy, trade)
                         if trade is not None and auto_orders and stop_after_order:
                             print("Stopping after submitted auto order.")
                             break
@@ -797,6 +819,7 @@ def parse_args(argv):
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --manual-orders\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position --auto-orders --regular-hours-only --max-spread-bps 20 --max-quote-age 10\n"
+            "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --dry-run-strategy --use-account-position --initial-buy-if-cash --auto-orders --regular-hours-only --max-spread-bps 20 --max-quote-age 10\n"
             "  ./venv/bin/python ibkr_bridge.py --symbol NVDA --market-data-type live --place-order BUY --order-quantity 1 --confirm-order\n"
             "  ./venv/bin/python ibkr_bridge.py --positions"
         ),
@@ -855,6 +878,11 @@ def parse_args(argv):
         "--use-account-position",
         action="store_true",
         help="For dry-run strategy, initialize CASH/LONG from the current TWS account position.",
+    )
+    parser.add_argument(
+        "--initial-buy-if-cash",
+        action="store_true",
+        help="If account-aware mode starts with zero shares, emit one GUI-style initial WOULD BUY.",
     )
     parser.add_argument("--bar-seconds", type=float, default=60.0, help="Dry-run strategy bar size in seconds.")
     parser.add_argument(
@@ -1068,6 +1096,7 @@ def main(argv=None):
                     "fixed_buy_fee": args.fixed_buy_fee,
                     "fixed_sell_fee": args.fixed_sell_fee,
                     "order_quantity": args.order_quantity,
+                    "initial_buy_if_cash": args.initial_buy_if_cash,
                 },
                 signal_log_path=args.signal_log,
                 live_plot_path=args.live_plot,
