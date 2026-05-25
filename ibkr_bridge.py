@@ -1005,7 +1005,7 @@ def parse_args(argv):
         help="Fixed dollar sell commission folded into the strategy cost h.",
     )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
-    parser.add_argument("--trail-a", type=float, default=0.03, help="Trailing-profit log drawdown threshold.")
+    parser.add_argument("--trail-a", type=float, default=0.02, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
     parser.add_argument("--drift-q", type=float, default=1e-7, help="Kalman drift process variance.")
     parser.add_argument(
