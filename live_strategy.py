@@ -337,6 +337,10 @@ class LiveDryRunStrategy:
             self.initial_position = new_position
             if new_position <= 0:
                 self.initial_avg_cost = None
+                # A filled sell creates tau_s. Reset so future cash/re-entry
+                # logic is measured from the post-sell live cycle.
+                self.bars = []
+                self.latest_data = None
 
     def _bars_for_strategy(self):
         """Add a synthetic entry anchor when TWS reports an existing position."""
