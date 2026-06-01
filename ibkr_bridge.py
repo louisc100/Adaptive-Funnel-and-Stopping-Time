@@ -617,7 +617,8 @@ def _open_signal_log(path):
 def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     """Save a refreshed live plot of mid-price, funnel, and Z statistic."""
     data = getattr(strategy, "latest_data", None)
-    if data is None:
+    display_bars = getattr(strategy, "display_bars", [])
+    if not display_bars:
         return
 
     from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -626,13 +627,8 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    prices = data["prices"]
-    funnel_mid = data["funnel_mid"]
-    funnel_up = data["funnel_up"]
-    funnel_low = data["funnel_low"]
-    zsig = data["Zsig"]
-    holding = data["holding"]
-    t_end = int(data["N"]) + 1
+    display_prices = [bar.close_mid for bar in display_bars]
+    t_end = len(display_prices)
     start = max(0, t_end - int(window_bars))
     xs = list(range(start, t_end))
 
@@ -648,21 +644,54 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
         for spine in ax.spines.values():
             spine.set_color("#3b4658")
 
-    ax_p.plot(xs, prices[start:t_end], color="#5dade2", lw=1.6, label="Mid price")
-    ax_p.plot(xs, funnel_up[start:t_end], color="#f59e0b", lw=1.0, ls="--", label="Upper funnel")
-    ax_p.plot(xs, funnel_low[start:t_end], color="#7dd3fc", lw=1.0, ls="--", label="Lower funnel")
-    ax_p.plot(xs, funnel_mid[start:t_end], color="#cbd5e1", lw=0.9, ls=":", label="Funnel center")
+    ax_p.plot(xs, display_prices[start:t_end], color="#5dade2", lw=1.6, label="Mid price")
 
-    buy_x = [x for x in data["buy_times"] if start <= x < t_end]
-    # The research engine starts from an internal reference buy at t=1.
-    # In account-aware cash mode that is not a live buy signal, so hide it.
-    if getattr(strategy, "initial_position", None) is not None:
-        buy_x = [x for x in buy_x if x != 1]
-    sell_x = [x for x in data["sell_times"] if start <= x < t_end]
-    if buy_x:
-        ax_p.scatter(buy_x, [prices[x] for x in buy_x], marker="^", s=55, color="#22c55e", label="Buy")
-    if sell_x:
-        ax_p.scatter(sell_x, [prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Sell")
+    z_x = []
+    z_y = []
+    if data is not None:
+        prices = data["prices"]
+        funnel_mid = data["funnel_mid"]
+        funnel_up = data["funnel_up"]
+        funnel_low = data["funnel_low"]
+        zsig = data["Zsig"]
+        holding = data["holding"]
+        strategy_end = int(data["N"]) + 1
+        mapped = [
+            (strategy.strategy_x_to_display_x(i), i)
+            for i in range(strategy_end)
+        ]
+        mapped = [
+            (display_x, strategy_x)
+            for display_x, strategy_x in mapped
+            if start <= display_x < t_end
+        ]
+        if mapped:
+            mx = [display_x for display_x, _ in mapped]
+            mi = [strategy_x for _, strategy_x in mapped]
+            ax_p.plot(mx, [funnel_up[i] for i in mi], color="#f59e0b", lw=1.0, ls="--", label="Upper funnel")
+            ax_p.plot(mx, [funnel_low[i] for i in mi], color="#7dd3fc", lw=1.0, ls="--", label="Lower funnel")
+            ax_p.plot(mx, [funnel_mid[i] for i in mi], color="#cbd5e1", lw=0.9, ls=":", label="Funnel center")
+            z_x = mx
+            z_y = [zsig[i] for i in mi]
+
+        buy_x = [
+            strategy.strategy_x_to_display_x(x)
+            for x in data["buy_times"]
+        ]
+        # The research engine starts from an internal reference buy at t=1.
+        # In account-aware cash mode that is not a live buy signal, so hide it.
+        if getattr(strategy, "initial_position", None) is not None:
+            buy_x = [x for x in buy_x if x != strategy.strategy_x_to_display_x(1)]
+        buy_x = [x for x in buy_x if start <= x < t_end]
+        sell_x = [
+            strategy.strategy_x_to_display_x(x)
+            for x in data["sell_times"]
+            if start <= strategy.strategy_x_to_display_x(x) < t_end
+        ]
+        if buy_x:
+            ax_p.scatter(buy_x, [display_prices[x] for x in buy_x], marker="^", s=55, color="#22c55e", label="Strategy buy")
+        if sell_x:
+            ax_p.scatter(sell_x, [display_prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Strategy sell")
 
     filled_markers = getattr(strategy, "filled_markers", [])
     filled_buys = [
@@ -706,22 +735,26 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
             zorder=6,
         )
 
-    current_color = "#22c55e" if holding[int(data["N"])] else "#f97316"
-    ax_p.scatter([int(data["N"])], [prices[int(data["N"])]], s=65, color=current_color, zorder=5)
+    current_color = "#22c55e" if getattr(strategy, "initial_position", 0.0) and strategy.initial_position > 0 else "#f97316"
+    ax_p.scatter([t_end - 1], [display_prices[-1]], s=65, color=current_color, zorder=5)
     ax_p.set_ylabel("Price", color="#d6deeb")
+    signal_text = "n/a" if signal is None else signal.signal
+    mid_text = display_prices[-1]
+    mtm_text = "n/a" if signal is None else f"{signal.mtm_w:.2f}"
     ax_p.set_title(
-        f"{signal.symbol} live strategy | {signal.signal} | "
-        f"mid {signal.close_mid:.2f} | W {signal.mtm_w:.2f}",
+        f"{strategy.symbol} live strategy | {signal_text} | "
+        f"mid {mid_text:.2f} | W {mtm_text}",
         color="#f8fafc",
     )
     ax_p.legend(loc="upper left", ncol=4, fontsize=8, facecolor="#10151f", edgecolor="#3b4658", labelcolor="#d6deeb")
 
-    ax_z.plot(xs, zsig[start:t_end], color="#14b8a6", lw=1.4, label="Z statistic")
-    ax_z.axhline(float(data["k"]), color="#ef4444", lw=0.9, ls="--", label="+k")
-    ax_z.axhline(-float(data["k"]), color="#22c55e", lw=0.9, ls="--", label="-k")
-    trend_z = data.get("trend_entry_z")
-    if trend_z is not None:
-        ax_z.axhline(float(trend_z), color="#f59e0b", lw=0.8, ls=":", label="z_trend")
+    if data is not None and z_x:
+        ax_z.plot(z_x, z_y, color="#14b8a6", lw=1.4, label="Current-cycle Z")
+        ax_z.axhline(float(data["k"]), color="#ef4444", lw=0.9, ls="--", label="+k")
+        ax_z.axhline(-float(data["k"]), color="#22c55e", lw=0.9, ls="--", label="-k")
+        trend_z = data.get("trend_entry_z")
+        if trend_z is not None:
+            ax_z.axhline(float(trend_z), color="#f59e0b", lw=0.8, ls=":", label="z_trend")
     ax_z.set_ylabel("Z", color="#d6deeb")
     ax_z.set_xlabel("Completed live bar index", color="#d6deeb")
     ax_z.legend(loc="upper left", ncol=4, fontsize=8, facecolor="#10151f", edgecolor="#3b4658", labelcolor="#d6deeb")

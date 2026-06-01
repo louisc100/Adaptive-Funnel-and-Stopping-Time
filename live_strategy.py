@@ -153,11 +153,14 @@ class LiveDryRunStrategy:
         self.initial_buy_if_cash = bool(initial_buy_if_cash)
         self._initial_buy_emitted = False
         self.bars = []
+        self.display_bars = []
+        self.cycle_start_display_index = 0
         self.latest_data = None
         self.filled_markers = []
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
+        self.display_bars.append(bar)
         self.bars.append(bar)
         if len(self.bars) < 2:
             return StrategySignal(
@@ -314,25 +317,22 @@ class LiveDryRunStrategy:
                 self.initial_avg_cost = price
             self._initial_buy_emitted = True
             # A filled buy creates a fresh tau_b anchor for subsequent sell logic.
+            fill_index = max(len(self.display_bars) - 1, 0)
             self.bars = []
+            self.cycle_start_display_index = len(self.display_bars)
             self.latest_data = None
-            self.filled_markers = [{
+            self.filled_markers.append({
                 "action": "BUY",
-                "index": 1,
+                "index": fill_index,
                 "price": price,
-            }]
+            })
         elif action == "SELL":
-            marker_index = None
-            if self.latest_data is not None:
-                marker_index = int(self.latest_data["N"])
-            elif self.bars:
-                marker_index = len(self.bars) - 1
-            if marker_index is not None:
-                self.filled_markers.append({
-                    "action": "SELL",
-                    "index": marker_index,
-                    "price": price,
-                })
+            marker_index = max(len(self.display_bars) - 1, 0)
+            self.filled_markers.append({
+                "action": "SELL",
+                "index": marker_index,
+                "price": price,
+            })
             new_position = max(current_position - quantity, 0.0)
             self.initial_position = new_position
             if new_position <= 0:
@@ -340,6 +340,7 @@ class LiveDryRunStrategy:
                 # A filled sell creates tau_s. Reset so future cash/re-entry
                 # logic is measured from the post-sell live cycle.
                 self.bars = []
+                self.cycle_start_display_index = len(self.display_bars)
                 self.latest_data = None
 
     def _bars_for_strategy(self):
@@ -357,6 +358,18 @@ class LiveDryRunStrategy:
         anchor0 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         anchor1 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         return [anchor0, anchor1] + self.bars
+
+    def strategy_x_to_display_x(self, strategy_index):
+        """Map current-cycle strategy index into persistent display index."""
+        anchor_count = 0
+        if (
+            self.initial_position is not None
+            and self.initial_position > 0
+            and self.initial_avg_cost is not None
+            and self.initial_avg_cost > 0
+        ):
+            anchor_count = 2
+        return self.cycle_start_display_index + int(strategy_index) - anchor_count
 
     def _is_regular_hours(self, timestamp):
         dt = datetime.fromisoformat(timestamp)
