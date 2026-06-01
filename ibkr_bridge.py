@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import select
 import sys
 import time
 from dataclasses import dataclass
@@ -205,6 +206,54 @@ def _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps):
     return trade
 
 
+def _limit_price_for_action(row, action, limit_buffer_bps):
+    buffer = max(float(limit_buffer_bps), 0.0) / 10000.0
+    action = action.upper()
+    if action == "BUY":
+        if row.ask is None:
+            return None
+        return row.ask * (1.0 + buffer)
+    if action == "SELL":
+        if row.bid is None:
+            return None
+        return row.bid * (1.0 - buffer)
+    return None
+
+
+def _submit_action_limit_order(
+    ib,
+    contract,
+    symbol,
+    action,
+    quantity,
+    limit_price,
+):
+    """Submit a direct BUY/SELL limit order from an interactive override."""
+    action = action.upper()
+    quantity = int(quantity)
+    if action not in ("BUY", "SELL"):
+        print("Order skipped: action must be BUY or SELL.")
+        return None
+    if quantity <= 0:
+        print("Order skipped: quantity must be positive.")
+        return None
+    if limit_price is None:
+        print("Order skipped: limit price is unavailable.")
+        return None
+
+    from ib_insync import LimitOrder
+
+    order = LimitOrder(action, quantity, round(float(limit_price), 2), tif="DAY")
+    trade = ib.placeOrder(contract, order)
+    ib.sleep(1.0)
+    print(
+        "Submitted interactive order: "
+        f"{action} {quantity} {symbol} LMT {_format_price(order.lmtPrice)} "
+        f"status={trade.orderStatus.status}"
+    )
+    return trade
+
+
 def _handle_order_signal(
     ib,
     contract,
@@ -265,6 +314,87 @@ def _sync_strategy_after_order(strategy, trade):
             "Strategy state synced after submitted order: "
             f"{action} {_format_quantity(quantity)} at anchor {_format_price(limit_price)}."
         )
+
+
+def _read_interactive_order_command():
+    """Return one pending terminal command without blocking the quote loop."""
+    if not sys.stdin or not sys.stdin.isatty():
+        return None
+    ready, _, _ = select.select([sys.stdin], [], [], 0)
+    if not ready:
+        return None
+    return sys.stdin.readline().strip()
+
+
+def _handle_interactive_order_command(
+    command,
+    ib,
+    contract,
+    symbol,
+    row,
+    strategy,
+    default_quantity,
+    limit_buffer_bps,
+):
+    """Handle terminal commands: buy [qty] [limit], sell [qty] [limit]."""
+    if not command:
+        return False
+    parts = command.split()
+    action = parts[0].lower()
+    if action in ("help", "?"):
+        print("Interactive commands: buy [qty] [limit], sell [qty] [limit], status, quit")
+        return False
+    if action == "status":
+        position = getattr(strategy, "initial_position", None)
+        avg_cost = getattr(strategy, "initial_avg_cost", None)
+        print(
+            "Strategy state: "
+            f"position={_format_quantity(position)}, "
+            f"anchor={_format_price(avg_cost)}, "
+            f"bid/ask={_format_price(row.bid)} / {_format_price(row.ask)}"
+        )
+        return False
+    if action in ("quit", "exit", "stop"):
+        print("Interactive stop requested.")
+        return True
+    if action not in ("buy", "sell"):
+        print(f"Unknown interactive command: {command!r}. Type 'help' for options.")
+        return False
+
+    quantity = default_quantity
+    if len(parts) >= 2:
+        try:
+            quantity = int(parts[1])
+        except ValueError:
+            print("Interactive order skipped: quantity must be an integer.")
+            return False
+
+    limit_price = None
+    if len(parts) >= 3:
+        try:
+            limit_price = float(parts[2])
+        except ValueError:
+            print("Interactive order skipped: limit price must be numeric.")
+            return False
+    else:
+        limit_price = _limit_price_for_action(row, action.upper(), limit_buffer_bps)
+
+    print("")
+    print("Interactive override")
+    print(f"Command: {command}")
+    print(f"Reference bid/ask: {_format_price(row.bid)} / {_format_price(row.ask)}")
+    print(f"Submitting: {action.upper()} {quantity} {symbol} LMT {_format_price(limit_price)}")
+    trade = _submit_action_limit_order(
+        ib,
+        contract,
+        symbol,
+        action.upper(),
+        quantity,
+        limit_price,
+    )
+    if trade is not None:
+        _sync_strategy_after_order(strategy, trade)
+    return False
 
 
 def place_direct_limit_order(
@@ -639,6 +769,7 @@ def watch_stock_quote(
     plot_window_bars=120,
     manual_orders=False,
     auto_orders=False,
+    interactive_orders=False,
     order_quantity=4,
     limit_buffer_bps=5.0,
     stop_after_order=True,
@@ -690,7 +821,7 @@ def watch_stock_quote(
             host,
             port,
             clientId=client_id,
-            readonly=not (manual_orders or auto_orders),
+            readonly=not (manual_orders or auto_orders or interactive_orders),
             timeout=timeout,
         )
         ib.reqMarketDataType(MARKET_DATA_TYPES[market_data_type])
@@ -711,8 +842,14 @@ def watch_stock_quote(
             print(f"Logging strategy signals to {signal_log_path}")
         if live_plot_path:
             print(f"Refreshing live strategy plot at {live_plot_path}")
+        if interactive_orders:
+            print(
+                "Interactive overrides enabled. Type commands like "
+                "'buy 1', 'sell 1', 'buy 1 123.45', 'status', or 'quit'."
+            )
         start = time.monotonic()
         last_good_quote_monotonic = None
+        should_stop = False
         while True:
             ib.sleep(interval)
             row = _quote_from_ticker(ticker, symbol, market_data_type)
@@ -723,6 +860,21 @@ def watch_stock_quote(
                 else time.monotonic() - last_good_quote_monotonic
             )
             _print_quote_row(row)
+            if interactive_orders:
+                command = _read_interactive_order_command()
+                if command:
+                    should_stop = _handle_interactive_order_command(
+                        command,
+                        ib,
+                        contract,
+                        symbol,
+                        row,
+                        strategy,
+                        order_quantity,
+                        limit_buffer_bps,
+                    )
+            if should_stop:
+                break
             if dry_run_strategy:
                 bar = bar_builder.update(row)
                 if bar is not None:
@@ -978,6 +1130,11 @@ def parse_args(argv):
         help="Submit a limit order automatically when dry-run emits WOULD BUY/WOULD SELL.",
     )
     parser.add_argument(
+        "--interactive-orders",
+        action="store_true",
+        help="Allow terminal overrides while running: buy [qty] [limit], sell [qty] [limit].",
+    )
+    parser.add_argument(
         "--keep-running-after-order",
         action="store_true",
         help="Keep watching after an auto order is submitted. Default stops after one auto order.",
@@ -1073,6 +1230,9 @@ def main(argv=None):
         if args.auto_orders and not args.dry_run_strategy:
             print("--auto-orders requires --dry-run-strategy.")
             return 1
+        if args.interactive_orders and not args.dry_run_strategy:
+            print("--interactive-orders requires --dry-run-strategy.")
+            return 1
         if args.manual_orders and args.auto_orders:
             print("Choose only one: --manual-orders or --auto-orders.")
             return 1
@@ -1152,6 +1312,7 @@ def main(argv=None):
                 plot_window_bars=args.plot_window_bars,
                 manual_orders=args.manual_orders,
                 auto_orders=args.auto_orders,
+                interactive_orders=args.interactive_orders,
                 order_quantity=args.order_quantity,
                 limit_buffer_bps=args.limit_buffer_bps,
                 stop_after_order=not args.keep_running_after_order,
