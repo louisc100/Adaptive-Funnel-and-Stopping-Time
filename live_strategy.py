@@ -154,6 +154,10 @@ class LiveDryRunStrategy:
         self._initial_buy_emitted = False
         self.bars = []
         self.display_bars = []
+        self.display_funnel_mid = []
+        self.display_funnel_up = []
+        self.display_funnel_low = []
+        self.display_z = []
         self.cycle_start_display_index = 0
         self.latest_data = None
         self.filled_markers = []
@@ -161,6 +165,10 @@ class LiveDryRunStrategy:
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
         self.display_bars.append(bar)
+        self.display_funnel_mid.append(np.nan)
+        self.display_funnel_up.append(np.nan)
+        self.display_funnel_low.append(np.nan)
+        self.display_z.append(np.nan)
         self.bars.append(bar)
         if len(self.bars) < 2:
             return StrategySignal(
@@ -202,6 +210,7 @@ class LiveDryRunStrategy:
             mode="IBKR dry-run",
         )
         self.latest_data = data
+        self._update_display_overlays(data)
         t = data["N"]
         buy_now = t in data["buy_times"]
         sell_now = t in data["sell_times"]
@@ -358,6 +367,16 @@ class LiveDryRunStrategy:
         anchor0 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         anchor1 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         return [anchor0, anchor1] + self.bars
+
+    def _update_display_overlays(self, data):
+        strategy_end = int(data["N"]) + 1
+        for strategy_index in range(strategy_end):
+            display_index = self.strategy_x_to_display_x(strategy_index)
+            if 0 <= display_index < len(self.display_bars):
+                self.display_funnel_mid[display_index] = data["funnel_mid"][strategy_index]
+                self.display_funnel_up[display_index] = data["funnel_up"][strategy_index]
+                self.display_funnel_low[display_index] = data["funnel_low"][strategy_index]
+                self.display_z[display_index] = data["Zsig"][strategy_index]
 
     def strategy_x_to_display_x(self, strategy_index):
         """Map current-cycle strategy index into persistent display index."""

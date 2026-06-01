@@ -628,6 +628,10 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     display_prices = [bar.close_mid for bar in display_bars]
+    display_funnel_mid = getattr(strategy, "display_funnel_mid", [])
+    display_funnel_up = getattr(strategy, "display_funnel_up", [])
+    display_funnel_low = getattr(strategy, "display_funnel_low", [])
+    display_z = getattr(strategy, "display_z", [])
     t_end = len(display_prices)
     start = max(0, t_end - int(window_bars))
     xs = list(range(start, t_end))
@@ -645,16 +649,14 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
             spine.set_color("#3b4658")
 
     ax_p.plot(xs, display_prices[start:t_end], color="#5dade2", lw=1.6, label="Mid price")
+    if len(display_funnel_up) == t_end:
+        ax_p.plot(xs, display_funnel_up[start:t_end], color="#f59e0b", lw=1.0, ls="--", label="Upper funnel")
+        ax_p.plot(xs, display_funnel_low[start:t_end], color="#7dd3fc", lw=1.0, ls="--", label="Lower funnel")
+        ax_p.plot(xs, display_funnel_mid[start:t_end], color="#cbd5e1", lw=0.9, ls=":", label="Funnel center")
 
     z_x = []
     z_y = []
     if data is not None:
-        prices = data["prices"]
-        funnel_mid = data["funnel_mid"]
-        funnel_up = data["funnel_up"]
-        funnel_low = data["funnel_low"]
-        zsig = data["Zsig"]
-        holding = data["holding"]
         strategy_end = int(data["N"]) + 1
         mapped = [
             (strategy.strategy_x_to_display_x(i), i)
@@ -668,11 +670,8 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
         if mapped:
             mx = [display_x for display_x, _ in mapped]
             mi = [strategy_x for _, strategy_x in mapped]
-            ax_p.plot(mx, [funnel_up[i] for i in mi], color="#f59e0b", lw=1.0, ls="--", label="Upper funnel")
-            ax_p.plot(mx, [funnel_low[i] for i in mi], color="#7dd3fc", lw=1.0, ls="--", label="Lower funnel")
-            ax_p.plot(mx, [funnel_mid[i] for i in mi], color="#cbd5e1", lw=0.9, ls=":", label="Funnel center")
             z_x = mx
-            z_y = [zsig[i] for i in mi]
+            z_y = [data["Zsig"][i] for i in mi]
 
         buy_x = [
             strategy.strategy_x_to_display_x(x)
@@ -748,8 +747,9 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     )
     ax_p.legend(loc="upper left", ncol=4, fontsize=8, facecolor="#10151f", edgecolor="#3b4658", labelcolor="#d6deeb")
 
-    if data is not None and z_x:
-        ax_z.plot(z_x, z_y, color="#14b8a6", lw=1.4, label="Current-cycle Z")
+    if len(display_z) == t_end:
+        ax_z.plot(xs, display_z[start:t_end], color="#14b8a6", lw=1.4, label="Z statistic")
+    if data is not None:
         ax_z.axhline(float(data["k"]), color="#ef4444", lw=0.9, ls="--", label="+k")
         ax_z.axhline(-float(data["k"]), color="#22c55e", lw=0.9, ls="--", label="-k")
         trend_z = data.get("trend_entry_z")
