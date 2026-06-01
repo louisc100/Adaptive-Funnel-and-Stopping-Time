@@ -154,7 +154,7 @@ class LiveDryRunStrategy:
         self._initial_buy_emitted = False
         self.bars = []
         self.latest_data = None
-        self.submitted_markers = []
+        self.filled_markers = []
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -300,8 +300,8 @@ class LiveDryRunStrategy:
             "sell": self.cost + self.fixed_sell_fee / notional,
         }
 
-    def apply_submitted_order(self, action, quantity, price):
-        """Synchronize live strategy state after the bridge submits an order."""
+    def apply_filled_order(self, action, quantity, price):
+        """Synchronize live strategy state after the bridge receives a fill."""
         action = action.upper()
         quantity = max(float(quantity), 0.0)
         price = None if price is None else float(price)
@@ -313,10 +313,10 @@ class LiveDryRunStrategy:
             if price is not None and price > 0:
                 self.initial_avg_cost = price
             self._initial_buy_emitted = True
-            # A submitted buy creates a fresh tau_b anchor for subsequent sell logic.
+            # A filled buy creates a fresh tau_b anchor for subsequent sell logic.
             self.bars = []
             self.latest_data = None
-            self.submitted_markers = [{
+            self.filled_markers = [{
                 "action": "BUY",
                 "index": 1,
                 "price": price,
@@ -328,7 +328,7 @@ class LiveDryRunStrategy:
             elif self.bars:
                 marker_index = len(self.bars) - 1
             if marker_index is not None:
-                self.submitted_markers.append({
+                self.filled_markers.append({
                     "action": "SELL",
                     "index": marker_index,
                     "price": price,

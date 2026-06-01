@@ -296,24 +296,62 @@ def _handle_order_signal(
     return None
 
 
-def _sync_strategy_after_order(strategy, trade):
-    """Update account-aware strategy state after a strategy order is submitted."""
-    if strategy is None or trade is None:
-        return
+def _trade_fill_price(trade):
+    status = getattr(trade, "orderStatus", None)
+    avg_fill = _safe_float(getattr(status, "avgFillPrice", None))
+    if avg_fill is not None and avg_fill > 0:
+        return avg_fill
+    fills = getattr(trade, "fills", None) or []
+    if fills:
+        price = _safe_float(getattr(fills[-1].execution, "price", None))
+        if price is not None and price > 0:
+            return price
     order = getattr(trade, "order", None)
+    return _safe_float(getattr(order, "lmtPrice", None))
+
+
+def _sync_strategy_after_fill(strategy, trade):
+    """Update account-aware strategy state only after TWS reports a fill."""
+    if strategy is None or trade is None:
+        return False
+    order = getattr(trade, "order", None)
+    status = getattr(trade, "orderStatus", None)
     if order is None:
-        return
+        return False
     action = getattr(order, "action", None)
-    quantity = getattr(order, "totalQuantity", None)
-    limit_price = getattr(order, "lmtPrice", None)
-    if action is None or quantity is None:
-        return
-    if hasattr(strategy, "apply_submitted_order"):
-        strategy.apply_submitted_order(action, quantity, limit_price)
+    filled = _safe_float(getattr(status, "filled", None))
+    synced_filled = _safe_float(getattr(trade, "_strategy_synced_filled", 0.0)) or 0.0
+    if action is None or filled is None or filled <= synced_filled:
+        return False
+    fill_delta = filled - synced_filled
+    fill_price = _trade_fill_price(trade)
+    if hasattr(strategy, "apply_filled_order"):
+        strategy.apply_filled_order(action, fill_delta, fill_price)
+        setattr(trade, "_strategy_synced_filled", filled)
         print(
-            "Strategy state synced after submitted order: "
-            f"{action} {_format_quantity(quantity)} at anchor {_format_price(limit_price)}."
+            "Strategy state synced after fill: "
+            f"{action} {_format_quantity(fill_delta)} at anchor {_format_price(fill_price)}."
         )
+        return True
+    return False
+
+
+def _check_pending_fills(strategy, pending_trades):
+    """Sync newly filled pending trades. Returns True if an auto-stop should fire."""
+    should_stop = False
+    remaining = []
+    for item in pending_trades:
+        trade = item["trade"]
+        stop_after_fill = item.get("stop_after_fill", False)
+        synced = _sync_strategy_after_fill(strategy, trade)
+        status = getattr(getattr(trade, "orderStatus", None), "status", "")
+        remaining_qty = _safe_float(getattr(getattr(trade, "orderStatus", None), "remaining", None))
+        if synced and stop_after_fill:
+            should_stop = True
+        if status not in ("Filled", "Cancelled", "Inactive") and remaining_qty != 0:
+            remaining.append(item)
+    pending_trades[:] = remaining
+    return should_stop
 
 
 def _read_interactive_order_command():
@@ -343,7 +381,7 @@ def _handle_interactive_order_command(
     action = parts[0].lower()
     if action in ("help", "?"):
         print("Interactive commands: buy [qty] [limit], sell [qty] [limit], status, quit")
-        return False
+        return False, None
     if action == "status":
         position = getattr(strategy, "initial_position", None)
         avg_cost = getattr(strategy, "initial_avg_cost", None)
@@ -353,13 +391,13 @@ def _handle_interactive_order_command(
             f"anchor={_format_price(avg_cost)}, "
             f"bid/ask={_format_price(row.bid)} / {_format_price(row.ask)}"
         )
-        return False
+        return False, None
     if action in ("quit", "exit", "stop"):
         print("Interactive stop requested.")
-        return True
+        return True, None
     if action not in ("buy", "sell"):
         print(f"Unknown interactive command: {command!r}. Type 'help' for options.")
-        return False
+        return False, None
 
     quantity = default_quantity
     if len(parts) >= 2:
@@ -367,7 +405,7 @@ def _handle_interactive_order_command(
             quantity = int(parts[1])
         except ValueError:
             print("Interactive order skipped: quantity must be an integer.")
-            return False
+            return False, None
 
     limit_price = None
     if len(parts) >= 3:
@@ -375,7 +413,7 @@ def _handle_interactive_order_command(
             limit_price = float(parts[2])
         except ValueError:
             print("Interactive order skipped: limit price must be numeric.")
-            return False
+            return False, None
     else:
         limit_price = _limit_price_for_action(row, action.upper(), limit_buffer_bps)
 
@@ -392,9 +430,7 @@ def _handle_interactive_order_command(
         quantity,
         limit_price,
     )
-    if trade is not None:
-        _sync_strategy_after_order(strategy, trade)
-    return False
+    return False, trade
 
 
 def place_direct_limit_order(
@@ -628,45 +664,45 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     if sell_x:
         ax_p.scatter(sell_x, [prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Sell")
 
-    submitted_markers = getattr(strategy, "submitted_markers", [])
-    submitted_buys = [
-        m for m in submitted_markers
+    filled_markers = getattr(strategy, "filled_markers", [])
+    filled_buys = [
+        m for m in filled_markers
         if (
             m.get("action") == "BUY"
             and m.get("price") is not None
             and start <= int(m.get("index", -1)) < t_end
         )
     ]
-    submitted_sells = [
-        m for m in submitted_markers
+    filled_sells = [
+        m for m in filled_markers
         if (
             m.get("action") == "SELL"
             and m.get("price") is not None
             and start <= int(m.get("index", -1)) < t_end
         )
     ]
-    if submitted_buys:
+    if filled_buys:
         ax_p.scatter(
-            [int(m["index"]) for m in submitted_buys],
-            [float(m["price"]) for m in submitted_buys],
+            [int(m["index"]) for m in filled_buys],
+            [float(m["price"]) for m in filled_buys],
             marker="^",
             s=95,
             color="#16a34a",
             edgecolors="#f8fafc",
             linewidths=0.8,
-            label="Submitted buy",
+            label="Filled buy",
             zorder=6,
         )
-    if submitted_sells:
+    if filled_sells:
         ax_p.scatter(
-            [int(m["index"]) for m in submitted_sells],
-            [float(m["price"]) for m in submitted_sells],
+            [int(m["index"]) for m in filled_sells],
+            [float(m["price"]) for m in filled_sells],
             marker="v",
             s=95,
             color="#dc2626",
             edgecolors="#f8fafc",
             linewidths=0.8,
-            label="Submitted sell",
+            label="Filled sell",
             zorder=6,
         )
 
@@ -850,6 +886,7 @@ def watch_stock_quote(
         start = time.monotonic()
         last_good_quote_monotonic = None
         should_stop = False
+        pending_trades = []
         while True:
             ib.sleep(interval)
             row = _quote_from_ticker(ticker, symbol, market_data_type)
@@ -860,10 +897,24 @@ def watch_stock_quote(
                 else time.monotonic() - last_good_quote_monotonic
             )
             _print_quote_row(row)
+            if pending_trades:
+                if _check_pending_fills(strategy, pending_trades):
+                    should_stop = True
+                if (
+                    live_plot_path
+                    and "signal" in locals()
+                    and getattr(strategy, "latest_data", None) is not None
+                ):
+                    _save_live_strategy_plot(
+                        strategy,
+                        signal,
+                        live_plot_path,
+                        window_bars=plot_window_bars,
+                    )
             if interactive_orders:
                 command = _read_interactive_order_command()
                 if command:
-                    should_stop = _handle_interactive_order_command(
+                    should_stop, trade = _handle_interactive_order_command(
                         command,
                         ib,
                         contract,
@@ -873,6 +924,11 @@ def watch_stock_quote(
                         order_quantity,
                         limit_buffer_bps,
                     )
+                    if trade is not None:
+                        pending_trades.append({
+                            "trade": trade,
+                            "stop_after_fill": False,
+                        })
             if should_stop:
                 break
             if dry_run_strategy:
@@ -893,7 +949,7 @@ def watch_stock_quote(
                             live_plot_path,
                             window_bars=plot_window_bars,
                         )
-                    if manual_orders or auto_orders:
+                    if (manual_orders or auto_orders) and not pending_trades:
                         trade = _handle_order_signal(
                             ib,
                             contract,
@@ -903,17 +959,12 @@ def watch_stock_quote(
                             auto_orders=auto_orders,
                         )
                         if trade is not None:
-                            _sync_strategy_after_order(strategy, trade)
-                            if live_plot_path and getattr(strategy, "latest_data", None) is not None:
-                                _save_live_strategy_plot(
-                                    strategy,
-                                    signal,
-                                    live_plot_path,
-                                    window_bars=plot_window_bars,
-                                )
-                        if trade is not None and auto_orders and stop_after_order:
-                            print("Stopping after submitted auto order.")
-                            break
+                            pending_trades.append({
+                                "trade": trade,
+                                "stop_after_fill": bool(auto_orders and stop_after_order),
+                            })
+                    elif auto_orders and pending_trades and signal.signal in ("WOULD BUY", "WOULD SELL"):
+                        print("Auto-order signal ignored while an earlier order is still pending fill.")
             if log_writer:
                 log_writer.writerow(row.__dict__)
                 log_file.flush()
@@ -1137,7 +1188,7 @@ def parse_args(argv):
     parser.add_argument(
         "--keep-running-after-order",
         action="store_true",
-        help="Keep watching after an auto order is submitted. Default stops after one auto order.",
+        help="Keep watching after an auto order is filled. Default stops after one auto fill.",
     )
     parser.add_argument("--order-quantity", type=int, default=4, help="Order quantity.")
     parser.add_argument(
