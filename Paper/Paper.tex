@@ -15,7 +15,7 @@
 \maketitle
 
 \begin{abstract}
-This paper formulates a discrete-time, long-only trading rule based on a drift-adjusted predictive funnel for log prices. The strategy enters and exits positions using standardized price deviations, local momentum, adaptive drift and volatility estimates, and an explicit transaction-cost profit threshold. The main formal property is a no-realized-loss guarantee for completed voluntary exits: whenever the algorithm sells under its own exit rule, the executable sale price is high enough to cover proportional buy and sell costs. This guarantee is deliberately narrow. It does not remove mark-to-market drawdown, opportunity cost, indefinite holding risk, model error, taxes, exact exchange microstructure, or finite-horizon liquidation risk. The implementation also includes practical modifications used in the simulation: bounded diagnostic funnels, trailing-profit exits, trend-continuation re-entry, spread/slippage-aware execution approximations, walk-forward parameter selection, online parameter smoothing, and real market bar data with horizon-dependent sampling intervals.
+This paper formulates a discrete-time, long-only trading rule based on a drift-adjusted predictive funnel for log prices. The strategy enters and exits positions using standardized price deviations, local momentum, adaptive drift and volatility estimates, and an explicit transaction-cost profit threshold. The main formal property is a no-realized-loss guarantee for completed voluntary exits: whenever the algorithm sells under its own exit rule, the executable sale price is high enough to cover proportional buy and sell costs. This guarantee is deliberately narrow. It does not remove mark-to-market drawdown, opportunity cost, indefinite holding risk, model error, taxes, exact exchange microstructure, or finite-horizon liquidation risk. The implementation also includes practical modifications used in the simulation: bounded diagnostic funnels, trailing-profit exits, trend-continuation re-entry, spread/slippage-aware execution approximations, a live sell-limit floor for fixed-fee break-even protection, walk-forward parameter selection, online parameter smoothing, and real market bar data with horizon-dependent sampling intervals.
 \end{abstract}
 
 \section{Motivation}
@@ -127,6 +127,25 @@ Under this execution convention, the profit-buffer condition is evaluated as
 >h.
 \]
 This is stricter than comparing close prices alone: a trade must overcome the modeled bid-ask spread, slippage, and the explicit proportional transaction costs before a voluntary sale is allowed.
+
+\subsection{Live Limit-Order Safeguard}
+
+The IBKR paper-trading bridge adds an execution-level safeguard for live sell orders. Let a filled buy anchor have execution price \(S_{\tau_b}^{\mathrm{fill}}\), let \(q\) be the number of shares submitted for sale, let \(F_{\mathrm{buy}}\) and \(F_{\mathrm{sell}}\) be fixed dollar commissions assigned to the cycle, and let \(m\geq 0\) be a small required net-profit buffer. Before submitting a sell limit order, the bridge computes
+\[
+P_{\min}
+=
+\frac{
+q S_{\tau_b}^{\mathrm{fill}}(1+c_{\mathrm{buy}})
++F_{\mathrm{buy}}+F_{\mathrm{sell}}+m
+}{
+q(1-c_{\mathrm{sell}})
+}.
+\]
+The submitted sell limit is then rounded upward to the nearest cent and constrained to satisfy
+\[
+P_{\mathrm{limit}}^{\mathrm{sell}}\geq P_{\min}.
+\]
+Consequently, a sell signal may produce a limit order above the current bid. In that case, the order will not fill immediately; it waits until the market can execute at a price that clears the anchored buy price, fixed fees, proportional costs, and the required profit buffer. In the code, the default fixed fees are \(F_{\mathrm{buy}}=1.00\), \(F_{\mathrm{sell}}=1.03\), and the default live buffer is \(m=0.01\) dollar. This safeguard separates three events: the strategy signal, the order submission, and the broker-confirmed fill. The realized anchor and the buy/sell plot markers are updated only after the broker reports a fill.
 
 \section{Trading Rule}
 

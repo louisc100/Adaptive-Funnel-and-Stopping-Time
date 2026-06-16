@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import math
 import select
 import sys
 import time
@@ -177,7 +178,52 @@ def _limit_price_for_signal(signal, limit_buffer_bps):
     return None
 
 
-def _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps):
+def _minimum_profitable_sell_limit(strategy, quantity, min_profit=0.01):
+    """Minimum sell limit that guarantees positive net profit if filled."""
+    if strategy is None:
+        return None
+    entry_price = _safe_float(getattr(strategy, "initial_avg_cost", None))
+    if entry_price is None or entry_price <= 0:
+        return None
+    quantity = int(quantity)
+    if quantity <= 0:
+        return None
+    prop_cost = max(float(getattr(strategy, "cost", 0.0)), 0.0)
+    if prop_cost >= 1.0:
+        return None
+    fixed_buy_fee = max(float(getattr(strategy, "fixed_buy_fee", 0.0)), 0.0)
+    fixed_sell_fee = max(float(getattr(strategy, "fixed_sell_fee", 0.0)), 0.0)
+    min_profit = max(float(min_profit), 0.0)
+    required_proceeds = (
+        entry_price * quantity * (1.0 + prop_cost)
+        + fixed_buy_fee
+        + fixed_sell_fee
+        + min_profit
+    )
+    raw_limit = required_proceeds / (quantity * (1.0 - prop_cost))
+    # IBKR equity limit prices are cent-based. Round upward so the floor survives
+    # price rounding and still leaves at least the requested profit buffer.
+    return math.ceil(raw_limit * 100.0) / 100.0
+
+
+def _apply_profitable_sell_floor(limit_price, strategy, quantity, min_profit=0.01):
+    floor = _minimum_profitable_sell_limit(strategy, quantity, min_profit=min_profit)
+    if floor is None:
+        return limit_price, None
+    if limit_price is None or limit_price < floor:
+        return floor, floor
+    return limit_price, floor
+
+
+def _submit_limit_order(
+    ib,
+    contract,
+    signal,
+    quantity,
+    limit_buffer_bps,
+    strategy=None,
+    min_sell_profit=0.01,
+):
     """Submit a limit order for a WOULD BUY / WOULD SELL signal."""
     if signal.signal not in ("WOULD BUY", "WOULD SELL"):
         return None
@@ -192,6 +238,14 @@ def _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps):
     if quantity <= 0:
         print("Order skipped: quantity must be positive.")
         return None
+    floor = None
+    if action == "SELL":
+        limit_price, floor = _apply_profitable_sell_floor(
+            limit_price,
+            strategy,
+            quantity,
+            min_profit=min_sell_profit,
+        )
 
     from ib_insync import LimitOrder
 
@@ -203,6 +257,11 @@ def _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps):
         f"{action} {quantity} {signal.symbol} LMT {_format_price(order.lmtPrice)} "
         f"status={trade.orderStatus.status}"
     )
+    if floor is not None:
+        print(
+            "Profit-safe sell floor applied: "
+            f"minimum LMT {_format_price(floor)} includes modeled fees."
+        )
     return trade
 
 
@@ -260,6 +319,8 @@ def _handle_order_signal(
     signal,
     quantity,
     limit_buffer_bps,
+    strategy=None,
+    min_sell_profit=0.01,
     auto_orders=False,
 ):
     """Prompt or auto-submit when the strategy emits an actionable signal."""
@@ -276,6 +337,14 @@ def _handle_order_signal(
     if quantity <= 0:
         print("Order skipped: quantity must be positive.")
         return None
+    floor = None
+    if action == "SELL":
+        limit_price, floor = _apply_profitable_sell_floor(
+            limit_price,
+            strategy,
+            quantity,
+            min_profit=min_sell_profit,
+        )
 
     print("")
     print("Order signal")
@@ -285,13 +354,40 @@ def _handle_order_signal(
     print(f"Quantity: {quantity}")
     print(f"Reference bid/ask: {_format_price(signal.close_bid)} / {_format_price(signal.close_ask)}")
     print(f"Suggested LMT price: {_format_price(limit_price)}")
+    if floor is not None:
+        print(
+            "Profit-safe sell floor: "
+            f"{_format_price(floor)} "
+            "(includes anchored buy cost and modeled fees)."
+        )
+        if signal.close_bid is not None and floor > signal.close_bid:
+            print(
+                "Current bid is below the profit-safe floor; "
+                "this sell limit may wait instead of filling immediately."
+            )
     if auto_orders:
         print("Auto-order mode is ON: submitting without y/n confirmation.")
-        return _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps)
+        return _submit_limit_order(
+            ib,
+            contract,
+            signal,
+            quantity,
+            limit_buffer_bps,
+            strategy=strategy,
+            min_sell_profit=min_sell_profit,
+        )
 
     answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
     if answer == "y":
-        return _submit_limit_order(ib, contract, signal, quantity, limit_buffer_bps)
+        return _submit_limit_order(
+            ib,
+            contract,
+            signal,
+            quantity,
+            limit_buffer_bps,
+            strategy=strategy,
+            min_sell_profit=min_sell_profit,
+        )
     print("Order skipped by user.")
     return None
 
@@ -381,6 +477,7 @@ def _handle_interactive_order_command(
     strategy,
     default_quantity,
     limit_buffer_bps,
+    min_sell_profit=0.01,
 ):
     """Handle terminal commands: buy [qty] [limit], sell [qty] [limit]."""
     if not command:
@@ -424,11 +521,30 @@ def _handle_interactive_order_command(
             return False, None
     else:
         limit_price = _limit_price_for_action(row, action.upper(), limit_buffer_bps)
+    floor = None
+    if action == "sell":
+        limit_price, floor = _apply_profitable_sell_floor(
+            limit_price,
+            strategy,
+            quantity,
+            min_profit=min_sell_profit,
+        )
 
     print("")
     print("Interactive override")
     print(f"Command: {command}")
     print(f"Reference bid/ask: {_format_price(row.bid)} / {_format_price(row.ask)}")
+    if floor is not None:
+        print(
+            "Profit-safe sell floor: "
+            f"{_format_price(floor)} "
+            "(includes anchored buy cost and modeled fees)."
+        )
+        if row.bid is not None and floor > row.bid:
+            print(
+                "Current bid is below the profit-safe floor; "
+                "this sell limit may wait instead of filling immediately."
+            )
     print(f"Submitting: {action.upper()} {quantity} {symbol} LMT {_format_price(limit_price)}")
     trade = _submit_action_limit_order(
         ib,
@@ -881,6 +997,7 @@ def watch_stock_quote(
     interactive_orders=False,
     order_quantity=4,
     limit_buffer_bps=5.0,
+    min_sell_profit=0.01,
     stop_after_order=True,
 ):
     """Continuously print Level 1 quotes from TWS and optionally act on signals."""
@@ -1011,6 +1128,7 @@ def watch_stock_quote(
                         strategy,
                         order_quantity,
                         limit_buffer_bps,
+                        min_sell_profit=min_sell_profit,
                     )
                     if trade is not None:
                         pending_trades.append({
@@ -1044,6 +1162,8 @@ def watch_stock_quote(
                             signal,
                             quantity=order_quantity,
                             limit_buffer_bps=limit_buffer_bps,
+                            strategy=strategy,
+                            min_sell_profit=min_sell_profit,
                             auto_orders=auto_orders,
                         )
                         if trade is not None:
@@ -1300,6 +1420,12 @@ def parse_args(argv):
         default=1.03,
         help="Fixed dollar sell commission folded into the strategy cost h.",
     )
+    parser.add_argument(
+        "--min-sell-profit",
+        type=float,
+        default=0.01,
+        help="Minimum net dollar profit required before a live sell limit can fill.",
+    )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
     parser.add_argument("--trail-a", type=float, default=0.02, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
@@ -1454,6 +1580,7 @@ def main(argv=None):
                 interactive_orders=args.interactive_orders,
                 order_quantity=args.order_quantity,
                 limit_buffer_bps=args.limit_buffer_bps,
+                min_sell_profit=args.min_sell_profit,
                 stop_after_order=not args.keep_running_after_order,
             )
         except KeyboardInterrupt:
