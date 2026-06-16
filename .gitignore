@@ -22,6 +22,7 @@ __pycache__/
 # Data/cache
 data/cache/
 data/paper_trading_state.json
+data/ibkr_signals/
 
 # Generated smoke-test reports
 Reports/*smoke*

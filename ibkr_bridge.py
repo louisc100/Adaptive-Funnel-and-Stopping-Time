@@ -536,7 +536,7 @@ def _quote_from_ticker(ticker, symbol, market_data_type):
     spread = ask - bid if bid is not None and ask is not None else None
     spread_bps = 10000.0 * spread / mid if spread is not None and mid else None
     return QuoteRow(
-        timestamp=datetime.now().isoformat(timespec="seconds"),
+        timestamp=datetime.now().astimezone().isoformat(timespec="seconds"),
         symbol=symbol,
         bid=bid,
         ask=ask,

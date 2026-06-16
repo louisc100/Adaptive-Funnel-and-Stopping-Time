@@ -393,7 +393,7 @@ class LiveDryRunStrategy:
     def _is_regular_hours(self, timestamp):
         dt = datetime.fromisoformat(timestamp)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("America/Vancouver"))
+            dt = dt.replace(tzinfo=datetime.now().astimezone().tzinfo)
         eastern = dt.astimezone(self.timezone)
         if eastern.weekday() >= 5:
             return False
