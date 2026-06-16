@@ -313,16 +313,16 @@ def _trade_fill_price(trade):
 def _sync_strategy_after_fill(strategy, trade):
     """Update account-aware strategy state only after TWS reports a fill."""
     if strategy is None or trade is None:
-        return False
+        return None
     order = getattr(trade, "order", None)
     status = getattr(trade, "orderStatus", None)
     if order is None:
-        return False
+        return None
     action = getattr(order, "action", None)
     filled = _safe_float(getattr(status, "filled", None))
     synced_filled = _safe_float(getattr(trade, "_strategy_synced_filled", 0.0)) or 0.0
     if action is None or filled is None or filled <= synced_filled:
-        return False
+        return None
     fill_delta = filled - synced_filled
     fill_price = _trade_fill_price(trade)
     if hasattr(strategy, "apply_filled_order"):
@@ -332,26 +332,34 @@ def _sync_strategy_after_fill(strategy, trade):
             "Strategy state synced after fill: "
             f"{action} {_format_quantity(fill_delta)} at anchor {_format_price(fill_price)}."
         )
-        return True
-    return False
+        return {
+            "action": action,
+            "quantity": fill_delta,
+            "price": fill_price,
+            "filled": filled,
+        }
+    return None
 
 
 def _check_pending_fills(strategy, pending_trades):
-    """Sync newly filled pending trades. Returns True if an auto-stop should fire."""
+    """Sync newly filled pending trades. Return (should_stop, fill_events)."""
     should_stop = False
+    fill_events = []
     remaining = []
     for item in pending_trades:
         trade = item["trade"]
         stop_after_fill = item.get("stop_after_fill", False)
-        synced = _sync_strategy_after_fill(strategy, trade)
+        fill_event = _sync_strategy_after_fill(strategy, trade)
+        if fill_event is not None:
+            fill_events.append(fill_event)
         status = getattr(getattr(trade, "orderStatus", None), "status", "")
         remaining_qty = _safe_float(getattr(getattr(trade, "orderStatus", None), "remaining", None))
-        if synced and stop_after_fill:
+        if fill_event is not None and stop_after_fill:
             should_stop = True
         if status not in ("Filled", "Cancelled", "Inactive") and remaining_qty != 0:
             remaining.append(item)
     pending_trades[:] = remaining
-    return should_stop
+    return should_stop, fill_events
 
 
 def _read_interactive_order_command():
@@ -612,6 +620,38 @@ def _open_signal_log(path):
     if not exists:
         writer.writeheader()
     return file_obj, writer
+
+
+def _fill_event_to_signal_row(fill_event, row, strategy):
+    """Represent an IBKR fill as a signal-log row for auditability."""
+    action = fill_event["action"].upper()
+    position = (
+        "LONG"
+        if getattr(strategy, "initial_position", 0.0)
+        and strategy.initial_position > 0
+        else "CASH"
+    )
+    return {
+        "timestamp": row.timestamp,
+        "symbol": row.symbol,
+        "bars": len(getattr(strategy, "display_bars", [])),
+        "close_mid": row.mid,
+        "close_bid": row.bid,
+        "close_ask": row.ask,
+        "position": position,
+        "signal": f"FILLED {action}",
+        "z": None,
+        "realized_w": "",
+        "mtm_w": "",
+        "trades": "",
+        "blocked": False,
+        "block_reason": "",
+        "note": (
+            f"IBKR fill confirmed: {action} "
+            f"{_format_quantity(fill_event['quantity'])} at "
+            f"{_format_price(fill_event['price'])}. Anchor updated now."
+        ),
+    }
 
 
 def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
@@ -931,10 +971,25 @@ def watch_stock_quote(
             )
             _print_quote_row(row)
             if pending_trades:
-                if _check_pending_fills(strategy, pending_trades):
+                stop_for_fill, fill_events = _check_pending_fills(strategy, pending_trades)
+                if signal_log_writer and fill_events:
+                    for fill_event in fill_events:
+                        signal_log_writer.writerow(
+                            _fill_event_to_signal_row(fill_event, row, strategy)
+                        )
+                    signal_log_file.flush()
+                if live_plot_path and fill_events:
+                    _save_live_strategy_plot(
+                        strategy,
+                        signal if "signal" in locals() else None,
+                        live_plot_path,
+                        window_bars=plot_window_bars,
+                    )
+                if stop_for_fill:
                     should_stop = True
                 if (
                     live_plot_path
+                    and not fill_events
                     and "signal" in locals()
                     and getattr(strategy, "latest_data", None) is not None
                 ):
