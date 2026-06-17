@@ -130,13 +130,17 @@ This is stricter than comparing close prices alone: a trade must overcome the mo
 
 \subsection{Live Limit-Order Safeguard}
 
-The IBKR paper-trading bridge adds an execution-level safeguard for live sell orders. Let a filled buy anchor have execution price \(S_{\tau_b}^{\mathrm{fill}}\), let \(q\) be the number of shares submitted for sale, let \(F_{\mathrm{buy}}\) and \(F_{\mathrm{sell}}\) be fixed dollar commissions assigned to the cycle, and let \(m\geq 0\) be a small required net-profit buffer. Before submitting a sell limit order, the bridge computes
+The IBKR paper-trading bridge adds an execution-level safeguard for live sell orders. Let a filled buy anchor have execution price \(S_{\tau_b}^{\mathrm{fill}}\), let \(q\) be the number of shares submitted for sale, let \(F_{\mathrm{buy}}\) and \(F_{\mathrm{sell}}\) be fixed dollar commissions assigned to the cycle, let \(m\geq 0\) be a required total net-profit buffer, and let \(m_{\mathrm{sh}}\geq 0\) be a required net-profit buffer per share. Define
+\[
+M=\max\{m,\ q m_{\mathrm{sh}}\}.
+\]
+Before submitting a sell limit order, the bridge computes
 \[
 P_{\min}
 =
 \frac{
 q S_{\tau_b}^{\mathrm{fill}}(1+c_{\mathrm{buy}})
-+F_{\mathrm{buy}}+F_{\mathrm{sell}}+m
++F_{\mathrm{buy}}+F_{\mathrm{sell}}+M
 }{
 q(1-c_{\mathrm{sell}})
 }.
@@ -145,7 +149,7 @@ The submitted sell limit is then rounded upward to the nearest cent and constrai
 \[
 P_{\mathrm{limit}}^{\mathrm{sell}}\geq P_{\min}.
 \]
-Consequently, a sell signal may produce a limit order above the current bid. In that case, the order will not fill immediately; it waits until the market can execute at a price that clears the anchored buy price, fixed fees, proportional costs, and the required profit buffer. In the code, the default fixed fees are \(F_{\mathrm{buy}}=1.00\), \(F_{\mathrm{sell}}=1.03\), and the default live buffer is \(m=0.01\) dollar. This safeguard separates three events: the strategy signal, the order submission, and the broker-confirmed fill. The realized anchor and the buy/sell plot markers are updated only after the broker reports a fill.
+Consequently, a sell signal may produce a limit order above the current bid. In that case, the order will not fill immediately; it waits until the market can execute at a price that clears the anchored buy price, fixed fees, proportional costs, and the required profit buffer. In the code, the default fixed fees are \(F_{\mathrm{buy}}=1.00\), \(F_{\mathrm{sell}}=1.03\), the default total live buffer is \(m=0.01\) dollar, and the default per-share live buffer is \(m_{\mathrm{sh}}=1.00\) dollar. The same profit target is also folded into the live strategy's effective cost threshold, so a voluntary sell signal itself requires the target, not merely the submitted limit order. This safeguard separates three events: the strategy signal, the order submission, and the broker-confirmed fill. The realized anchor and the buy/sell plot markers are updated only after the broker reports a fill.
 
 \section{Trading Rule}
 

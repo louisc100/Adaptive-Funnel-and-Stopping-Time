@@ -178,7 +178,12 @@ def _limit_price_for_signal(signal, limit_buffer_bps):
     return None
 
 
-def _minimum_profitable_sell_limit(strategy, quantity, min_profit=0.01):
+def _minimum_profitable_sell_limit(
+    strategy,
+    quantity,
+    min_profit=0.01,
+    min_profit_per_share=0.0,
+):
     """Minimum sell limit that guarantees positive net profit if filled."""
     if strategy is None:
         return None
@@ -194,6 +199,8 @@ def _minimum_profitable_sell_limit(strategy, quantity, min_profit=0.01):
     fixed_buy_fee = max(float(getattr(strategy, "fixed_buy_fee", 0.0)), 0.0)
     fixed_sell_fee = max(float(getattr(strategy, "fixed_sell_fee", 0.0)), 0.0)
     min_profit = max(float(min_profit), 0.0)
+    min_profit_per_share = max(float(min_profit_per_share), 0.0)
+    min_profit = max(min_profit, min_profit_per_share * quantity)
     required_proceeds = (
         entry_price * quantity * (1.0 + prop_cost)
         + fixed_buy_fee
@@ -206,8 +213,19 @@ def _minimum_profitable_sell_limit(strategy, quantity, min_profit=0.01):
     return math.ceil(raw_limit * 100.0) / 100.0
 
 
-def _apply_profitable_sell_floor(limit_price, strategy, quantity, min_profit=0.01):
-    floor = _minimum_profitable_sell_limit(strategy, quantity, min_profit=min_profit)
+def _apply_profitable_sell_floor(
+    limit_price,
+    strategy,
+    quantity,
+    min_profit=0.01,
+    min_profit_per_share=0.0,
+):
+    floor = _minimum_profitable_sell_limit(
+        strategy,
+        quantity,
+        min_profit=min_profit,
+        min_profit_per_share=min_profit_per_share,
+    )
     if floor is None:
         return limit_price, None
     if limit_price is None or limit_price < floor:
@@ -223,6 +241,7 @@ def _submit_limit_order(
     limit_buffer_bps,
     strategy=None,
     min_sell_profit=0.01,
+    min_sell_profit_per_share=0.0,
 ):
     """Submit a limit order for a WOULD BUY / WOULD SELL signal."""
     if signal.signal not in ("WOULD BUY", "WOULD SELL"):
@@ -245,6 +264,7 @@ def _submit_limit_order(
             strategy,
             quantity,
             min_profit=min_sell_profit,
+            min_profit_per_share=min_sell_profit_per_share,
         )
 
     from ib_insync import LimitOrder
@@ -321,6 +341,7 @@ def _handle_order_signal(
     limit_buffer_bps,
     strategy=None,
     min_sell_profit=0.01,
+    min_sell_profit_per_share=0.0,
     auto_orders=False,
 ):
     """Prompt or auto-submit when the strategy emits an actionable signal."""
@@ -344,6 +365,7 @@ def _handle_order_signal(
             strategy,
             quantity,
             min_profit=min_sell_profit,
+            min_profit_per_share=min_sell_profit_per_share,
         )
 
     print("")
@@ -375,6 +397,7 @@ def _handle_order_signal(
             limit_buffer_bps,
             strategy=strategy,
             min_sell_profit=min_sell_profit,
+            min_sell_profit_per_share=min_sell_profit_per_share,
         )
 
     answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
@@ -387,6 +410,7 @@ def _handle_order_signal(
             limit_buffer_bps,
             strategy=strategy,
             min_sell_profit=min_sell_profit,
+            min_sell_profit_per_share=min_sell_profit_per_share,
         )
     print("Order skipped by user.")
     return None
@@ -478,6 +502,7 @@ def _handle_interactive_order_command(
     default_quantity,
     limit_buffer_bps,
     min_sell_profit=0.01,
+    min_sell_profit_per_share=0.0,
 ):
     """Handle terminal commands: buy [qty] [limit], sell [qty] [limit]."""
     if not command:
@@ -528,6 +553,7 @@ def _handle_interactive_order_command(
             strategy,
             quantity,
             min_profit=min_sell_profit,
+            min_profit_per_share=min_sell_profit_per_share,
         )
 
     print("")
@@ -998,6 +1024,7 @@ def watch_stock_quote(
     order_quantity=4,
     limit_buffer_bps=5.0,
     min_sell_profit=0.01,
+    min_sell_profit_per_share=0.0,
     stop_after_order=True,
 ):
     """Continuously print Level 1 quotes from TWS and optionally act on signals."""
@@ -1129,6 +1156,7 @@ def watch_stock_quote(
                         order_quantity,
                         limit_buffer_bps,
                         min_sell_profit=min_sell_profit,
+                        min_sell_profit_per_share=min_sell_profit_per_share,
                     )
                     if trade is not None:
                         pending_trades.append({
@@ -1164,6 +1192,7 @@ def watch_stock_quote(
                             limit_buffer_bps=limit_buffer_bps,
                             strategy=strategy,
                             min_sell_profit=min_sell_profit,
+                            min_sell_profit_per_share=min_sell_profit_per_share,
                             auto_orders=auto_orders,
                         )
                         if trade is not None:
@@ -1427,6 +1456,12 @@ def parse_args(argv):
         default=0.01,
         help="Minimum net dollar profit required before a live sell limit can fill.",
     )
+    parser.add_argument(
+        "--min-sell-profit-per-share",
+        type=float,
+        default=1.0,
+        help="Minimum net profit per share required before a live sell limit can fill.",
+    )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
     parser.add_argument("--trail-a", type=float, default=0.01, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
@@ -1571,6 +1606,8 @@ def main(argv=None):
                     "max_quote_age": args.max_quote_age,
                     "fixed_buy_fee": args.fixed_buy_fee,
                     "fixed_sell_fee": args.fixed_sell_fee,
+                    "min_sell_profit": args.min_sell_profit,
+                    "min_sell_profit_per_share": args.min_sell_profit_per_share,
                     "order_quantity": args.order_quantity,
                     "initial_buy_if_cash": args.initial_buy_if_cash,
                 },
@@ -1583,6 +1620,7 @@ def main(argv=None):
                 order_quantity=args.order_quantity,
                 limit_buffer_bps=args.limit_buffer_bps,
                 min_sell_profit=args.min_sell_profit,
+                min_sell_profit_per_share=args.min_sell_profit_per_share,
                 stop_after_order=not args.keep_running_after_order,
             )
         except KeyboardInterrupt:

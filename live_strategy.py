@@ -135,6 +135,8 @@ class LiveDryRunStrategy:
         timezone="America/New_York",
         fixed_buy_fee=0.0,
         fixed_sell_fee=0.0,
+        min_sell_profit=0.0,
+        min_sell_profit_per_share=0.0,
         order_quantity=1,
         initial_buy_if_cash=False,
     ):
@@ -157,6 +159,8 @@ class LiveDryRunStrategy:
         self.timezone = ZoneInfo(timezone)
         self.fixed_buy_fee = max(float(fixed_buy_fee), 0.0)
         self.fixed_sell_fee = max(float(fixed_sell_fee), 0.0)
+        self.min_sell_profit = max(float(min_sell_profit), 0.0)
+        self.min_sell_profit_per_share = max(float(min_sell_profit_per_share), 0.0)
         self.order_quantity = max(int(order_quantity), 1)
         self.initial_buy_if_cash = bool(initial_buy_if_cash)
         self._initial_buy_emitted = False
@@ -329,9 +333,13 @@ class LiveDryRunStrategy:
 
     def _effective_proportional_cost(self, reference_price):
         notional = max(float(reference_price) * self.order_quantity, 1e-12)
+        target_profit = max(
+            self.min_sell_profit,
+            self.min_sell_profit_per_share * self.order_quantity,
+        )
         return {
             "buy": self.cost + self.fixed_buy_fee / notional,
-            "sell": self.cost + self.fixed_sell_fee / notional,
+            "sell": self.cost + (self.fixed_sell_fee + target_profit) / notional,
         }
 
     def apply_filled_order(self, action, quantity, price):
