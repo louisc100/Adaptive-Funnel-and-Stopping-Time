@@ -16,7 +16,13 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from main import estimate_sigma_seed, run_strategy_on_log_prices, summarize_simulation
+from main import (
+    estimate_sigma_seed,
+    garch_volatility_estimates,
+    kalman_drift_estimates,
+    run_strategy_on_log_prices,
+    summarize_simulation,
+)
 
 
 @dataclass
@@ -113,6 +119,7 @@ class LiveDryRunStrategy:
         symbol,
         k=1.2,
         delta=8,
+        entry_delta=None,
         cost=0.0,
         drift_process_var=1e-7,
         max_funnel_lookback=60,
@@ -134,6 +141,7 @@ class LiveDryRunStrategy:
         self.symbol = symbol.upper()
         self.k = float(k)
         self.delta = int(delta)
+        self.entry_delta = int(self.delta if entry_delta is None else entry_delta)
         self.cost = float(cost)
         self.drift_process_var = float(drift_process_var)
         self.max_funnel_lookback = int(max_funnel_lookback)
@@ -161,6 +169,8 @@ class LiveDryRunStrategy:
         self.cycle_start_display_index = 0
         self.latest_data = None
         self.filled_markers = []
+        self.cash_anchor_price = None
+        self.cash_anchor_timestamp = None
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -214,6 +224,14 @@ class LiveDryRunStrategy:
         t = data["N"]
         buy_now = t in data["buy_times"]
         sell_now = t in data["sell_times"]
+        cash_reentry = None
+        if self.initial_position is not None and self.initial_position <= 0:
+            cash_reentry = self._cash_reentry_signal(bar, blocked)
+            if cash_reentry is not None:
+                data = cash_reentry["data"]
+                self.latest_data = data
+                t = data["N"]
+                buy_now = cash_reentry["buy_now"]
         research_position = "LONG" if bool(data["holding"][t]) else "CASH"
         if self.initial_position is None:
             position = research_position
@@ -263,7 +281,11 @@ class LiveDryRunStrategy:
                 self._initial_buy_emitted = True
             elif buy_now and t != 1:
                 signal = "WOULD BUY"
-                note = "Account-aware dry run; current account has no position."
+                note = (
+                    "Account-aware dry run; cash re-entry from last filled sell."
+                    if cash_reentry is not None
+                    else "Account-aware dry run; current account has no position."
+                )
             else:
                 signal = "HOLD CASH"
                 note = "Account-aware dry run; current account has no position."
@@ -324,6 +346,8 @@ class LiveDryRunStrategy:
             self.initial_position = new_position
             if price is not None and price > 0:
                 self.initial_avg_cost = price
+            self.cash_anchor_price = None
+            self.cash_anchor_timestamp = None
             self._initial_buy_emitted = True
             # A filled buy creates a fresh tau_b anchor for subsequent sell logic.
             fill_index = max(len(self.display_bars) - 1, 0)
@@ -346,8 +370,12 @@ class LiveDryRunStrategy:
             self.initial_position = new_position
             if new_position <= 0:
                 self.initial_avg_cost = None
-                # A filled sell creates tau_s. Reset so future cash/re-entry
-                # logic is measured from the post-sell live cycle.
+                # A filled sell creates tau_s for cash re-entry logic.
+                if price is not None and price > 0:
+                    self.cash_anchor_price = price
+                    self.cash_anchor_timestamp = (
+                        self.display_bars[-1].timestamp if self.display_bars else None
+                    )
                 self.bars = []
                 self.cycle_start_display_index = len(self.display_bars)
                 self.latest_data = None
@@ -367,6 +395,97 @@ class LiveDryRunStrategy:
         anchor0 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         anchor1 = MidBar(first_ts, entry, entry, entry, entry, entry, entry, 0.0)
         return [anchor0, anchor1] + self.bars
+
+    def _bars_for_cash_reentry(self):
+        """Build a sell-anchored path for cash re-entry diagnostics."""
+        if (
+            self.cash_anchor_price is None
+            or self.cash_anchor_price <= 0
+            or not self.bars
+        ):
+            return None
+        ts = self.cash_anchor_timestamp or self.bars[0].timestamp
+        anchor = float(self.cash_anchor_price)
+        anchor_bar = MidBar(ts, anchor, anchor, anchor, anchor, anchor, anchor, 0.0)
+        return [anchor_bar] + self.bars
+
+    def _cash_reentry_signal(self, bar, blocked):
+        """Evaluate re-entry from the last filled sell anchor while in cash."""
+        if blocked:
+            return None
+        strategy_bars = self._bars_for_cash_reentry()
+        if strategy_bars is None or len(strategy_bars) < 2:
+            return None
+
+        mids = np.asarray([b.close_mid for b in strategy_bars], dtype=float)
+        lp = np.log(mids)
+        sigma_seed = estimate_sigma_seed(lp)
+        log_returns = np.diff(lp)
+        mu_step, _ = kalman_drift_estimates(
+            log_returns,
+            init_mu=0.0,
+            obs_var=sigma_seed * sigma_seed,
+            process_var=self.drift_process_var,
+        )
+        var_step, _ = garch_volatility_estimates(
+            log_returns,
+            mu_prior=mu_step,
+            init_var=sigma_seed * sigma_seed,
+        )
+        cumulative_drift = np.zeros(len(lp))
+        cumulative_var = np.zeros(len(lp))
+        cumulative_drift[1:] = np.cumsum(mu_step[1:])
+        cumulative_var[1:] = np.cumsum(var_step[1:])
+
+        n = len(lp)
+        t = n - 1
+        d = min(max(1, self.entry_delta), t)
+        ref_t = 0
+        if self.max_funnel_lookback is not None and t > self.max_funnel_lookback:
+            ref_t = t - self.max_funnel_lookback
+        drift = cumulative_drift[t] - cumulative_drift[ref_t]
+        var = cumulative_var[t] - cumulative_var[ref_t]
+        denom = np.sqrt(var)
+        z = (lp[t] - lp[ref_t] - drift) / denom if denom > 0 else np.nan
+        momentum = lp[t] - lp[t - d] if t >= d else np.nan
+        buy_now = (
+            t >= d
+            and not np.isnan(z)
+            and not np.isnan(momentum)
+            and (
+                (z < -self.k and momentum >= 0.0)
+                or (
+                    self.trend_entry_z is not None
+                    and z > self.trend_entry_z
+                    and momentum > 0.0
+                )
+            )
+        )
+
+        data = {
+            "N": t,
+            "k": self.k,
+            "trend_entry_z": self.trend_entry_z,
+            "Zsig": np.full(n, np.nan),
+            "holding": np.zeros(n, dtype=bool),
+            "buy_times": {t} if buy_now else set(),
+            "sell_times": set(),
+            "realized_w": np.full(n, 1000.0),
+            "portfolio_w": np.full(n, 1000.0),
+            "buy_hold_w": np.full(n, 1000.0),
+            "funnel_mid": np.full(n, np.nan),
+            "funnel_up": np.full(n, np.nan),
+            "funnel_low": np.full(n, np.nan),
+            "trade_log": [],
+        }
+        center = lp[ref_t] + drift
+        width = self.k * denom
+        data["Zsig"][t] = z
+        data["funnel_mid"][t] = np.exp(center)
+        data["funnel_up"][t] = np.exp(center + width)
+        data["funnel_low"][t] = np.exp(center - width)
+        self._update_display_overlays(data)
+        return {"buy_now": buy_now, "data": data}
 
     def _update_display_overlays(self, data):
         strategy_end = int(data["N"]) + 1
@@ -388,6 +507,13 @@ class LiveDryRunStrategy:
             and self.initial_avg_cost > 0
         ):
             anchor_count = 2
+        elif (
+            self.initial_position is not None
+            and self.initial_position <= 0
+            and self.cash_anchor_price is not None
+            and self.cash_anchor_price > 0
+        ):
+            anchor_count = 1
         return self.cycle_start_display_index + int(strategy_index) - anchor_count
 
     def _is_regular_hours(self, timestamp):

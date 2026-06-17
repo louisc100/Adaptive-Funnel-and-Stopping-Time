@@ -194,11 +194,11 @@ H_t-X_t\geq a
 \qquad\text{and}\qquad
 \log S_t^{\mathrm{sell}}-\log S_{\tau_b}^{\mathrm{buy}}>h.
 \]
-The default implementation uses \(a=0.04\) in log-price units. Since the profit condition is retained, this practical exit does not weaken the no-realized-loss theorem.
+The simulation interface treats \(a\) as a tunable design parameter. In the live IBKR bridge, the default was tightened to \(a=0.01\) in log-price units so that intraday paper-trading cycles lock in gains after a smaller drawdown from the post-entry peak. Since the profit condition is retained, this practical exit does not weaken the no-realized-loss theorem.
 
 \subsection{Re-Entry}
 
-After a sale at \(\tau_s\), the strategy holds cash and uses \(\tau_s\) as the new reference point. The original symmetric re-entry rule buys after a lower-funnel recovery:
+After a sale at \(\tau_s\), the strategy holds cash and uses \(\tau_s\) as the new reference point. The live implementation preserves the filled sell price as this cash anchor, so re-entry is measured from the actual broker-confirmed exit rather than from a fresh unanchored path. The original symmetric re-entry rule buys after a lower-funnel recovery:
 \[
 Z_{\tau_s,t}<-k,
 \qquad
@@ -216,6 +216,8 @@ t>\tau_s+\delta:
 \right\}.
 \]
 The default value is \(z_{\mathrm{trend}}=0.35\), intentionally smaller than \(k\). The first condition seeks a recovered discount; the second permits participation in an ongoing upward trend. At the current Layer 2 stage, \(z_{\mathrm{trend}}\) is treated as a fixed design constant; in later calibration work it should either be selected by walk-forward validation or made time-varying with the entry/exit thresholds.
+
+For live paper trading, the momentum window is separated into an exit window \(\delta_{\mathrm{exit}}\) and an entry window \(\delta_{\mathrm{entry}}\). The default live values are \(\delta_{\mathrm{exit}}=3\) and \(\delta_{\mathrm{entry}}=2\). This keeps sell decisions from reacting to a single noisy bar while allowing lower-funnel recoveries after a filled sell to be detected sooner.
 
 \section{No-Realized-Loss Property}
 

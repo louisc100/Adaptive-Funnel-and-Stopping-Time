@@ -1407,6 +1407,7 @@ def parse_args(argv):
     )
     parser.add_argument("--k", type=float, default=0.8, help="Strategy funnel threshold.")
     parser.add_argument("--delta", type=int, default=3, help="Strategy momentum window in bars.")
+    parser.add_argument("--entry-delta", type=int, default=2, help="Cash re-entry momentum window in bars.")
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
     parser.add_argument(
         "--fixed-buy-fee",
@@ -1427,7 +1428,7 @@ def parse_args(argv):
         help="Minimum net dollar profit required before a live sell limit can fill.",
     )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
-    parser.add_argument("--trail-a", type=float, default=0.02, help="Trailing-profit log drawdown threshold.")
+    parser.add_argument("--trail-a", type=float, default=0.01, help="Trailing-profit log drawdown threshold.")
     parser.add_argument("--z-trend", type=float, default=0.35, help="Trend re-entry Z threshold.")
     parser.add_argument("--drift-q", type=float, default=1e-7, help="Kalman drift process variance.")
     parser.add_argument(
@@ -1557,6 +1558,7 @@ def main(argv=None):
                 strategy_kwargs={
                     "k": args.k,
                     "delta": args.delta,
+                    "entry_delta": args.entry_delta,
                     "cost": args.cost,
                     "drift_process_var": args.drift_q,
                     "max_funnel_lookback": args.lookback_L,
