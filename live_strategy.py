@@ -175,6 +175,7 @@ class LiveDryRunStrategy:
         self.filled_markers = []
         self.cash_anchor_price = None
         self.cash_anchor_timestamp = None
+        self.last_live_exit_reason = ""
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -208,21 +209,24 @@ class LiveDryRunStrategy:
         lp = np.log(mids)
         sigma_seed = estimate_sigma_seed(lp)
         effective_cost = self._effective_proportional_cost(bar.close_mid)
-        data = run_strategy_on_log_prices(
-            lp,
-            k=self.k,
-            delta=min(self.delta, max(1, len(lp) - 2)),
-            sigma_seed=sigma_seed,
-            c_buy=effective_cost["buy"],
-            c_sell=effective_cost["sell"],
-            drift_process_var=self.drift_process_var,
-            max_funnel_lookback=self.max_funnel_lookback,
-            trailing_stop=self.trailing_stop,
-            trend_entry_z=self.trend_entry_z,
-            execution_spread=self.execution_spread,
-            execution_slippage=self.execution_slippage,
-            mode="IBKR dry-run",
-        )
+        if self.initial_position is not None and self.initial_position > 0:
+            data = self._long_diagnostics(lp, effective_cost)
+        else:
+            data = run_strategy_on_log_prices(
+                lp,
+                k=self.k,
+                delta=min(self.delta, max(1, len(lp) - 2)),
+                sigma_seed=sigma_seed,
+                c_buy=effective_cost["buy"],
+                c_sell=effective_cost["sell"],
+                drift_process_var=self.drift_process_var,
+                max_funnel_lookback=self.max_funnel_lookback,
+                trailing_stop=self.trailing_stop,
+                trend_entry_z=self.trend_entry_z,
+                execution_spread=self.execution_spread,
+                execution_slippage=self.execution_slippage,
+                mode="IBKR dry-run",
+            )
         self.latest_data = data
         self._update_display_overlays(data)
         t = data["N"]
@@ -253,23 +257,27 @@ class LiveDryRunStrategy:
                 note = ""
         elif self.initial_position > 0:
             position = "LONG"
+            live_sell = self._live_long_sell_signal(bar, data)
             if blocked:
                 signal = f"BLOCKED {block_reason}"
                 note = (
                     f"Account-aware dry run; current account holds "
                     f"{self.initial_position:g} shares."
                 )
-            elif sell_now:
+            elif live_sell["sell_now"]:
                 signal = "WOULD SELL"
                 note = (
                     f"Account-aware dry run; current account holds "
-                    f"{self.initial_position:g} shares."
+                    f"{self.initial_position:g} shares. "
+                    f"{live_sell['reason']}"
                 )
             else:
                 signal = "HOLD LONG"
+                suffix = f" {live_sell['reason']}" if live_sell["reason"] else ""
                 note = (
                     f"Account-aware dry run; current account holds "
                     f"{self.initial_position:g} shares."
+                    f"{suffix}"
                 )
         else:
             position = "CASH"
@@ -313,6 +321,147 @@ class LiveDryRunStrategy:
             blocked=blocked,
             block_reason=block_reason,
         )
+
+    def _long_diagnostics(self, lp, effective_cost):
+        """Compute live long diagnostics without virtual buy/sell transitions."""
+        n = len(lp)
+        buy_t = 1 if n > 1 else 0
+        buy_lp = lp[buy_t]
+        log_returns = np.diff(lp)
+        sigma_seed = estimate_sigma_seed(lp)
+        mu_step, _ = kalman_drift_estimates(
+            log_returns,
+            init_mu=0.0,
+            obs_var=sigma_seed * sigma_seed,
+            process_var=self.drift_process_var,
+        )
+        var_step, _ = garch_volatility_estimates(
+            log_returns,
+            mu_prior=mu_step,
+            init_var=sigma_seed * sigma_seed,
+        )
+        cumulative_drift = np.zeros(n)
+        cumulative_var = np.zeros(n)
+        cumulative_drift[1:] = np.cumsum(mu_step[1:])
+        cumulative_var[1:] = np.cumsum(var_step[1:])
+
+        zsig = np.full(n, np.nan)
+        funnel_mid = np.full(n, np.nan)
+        funnel_up = np.full(n, np.nan)
+        funnel_low = np.full(n, np.nan)
+        portfolio_w = np.full(n, 1000.0)
+        liquidation_cost = (1.0 - effective_cost["sell"]) / (1.0 + effective_cost["buy"])
+
+        for t in range(buy_t, n):
+            el = t - buy_t
+            ref_t = buy_t
+            ref_lp = buy_lp
+            if self.max_funnel_lookback is not None and el > self.max_funnel_lookback:
+                ref_t = t - self.max_funnel_lookback
+                ref_lp = lp[ref_t]
+            drift = cumulative_drift[t] - cumulative_drift[ref_t]
+            var = cumulative_var[t] - cumulative_var[ref_t]
+            denom = np.sqrt(var)
+            center = ref_lp + drift
+            width = self.k * denom
+            funnel_mid[t] = np.exp(center)
+            funnel_up[t] = np.exp(center + width)
+            funnel_low[t] = np.exp(center - width)
+            zsig[t] = (lp[t] - ref_lp - drift) / denom if denom > 0 else np.nan
+            portfolio_w[t] = 1000.0 * np.exp(lp[t] - buy_lp) * liquidation_cost
+
+        return {
+            "N": n - 1,
+            "k": self.k,
+            "trend_entry_z": self.trend_entry_z,
+            "Zsig": zsig,
+            "holding": np.ones(n, dtype=bool),
+            "buy_times": set(),
+            "sell_times": set(),
+            "realized_w": np.full(n, 1000.0),
+            "portfolio_w": portfolio_w,
+            "buy_hold_w": portfolio_w.copy(),
+            "funnel_mid": funnel_mid,
+            "funnel_up": funnel_up,
+            "funnel_low": funnel_low,
+            "trade_log": [],
+        }
+
+    def _minimum_profitable_sell_price(self):
+        entry_price = self.initial_avg_cost
+        if entry_price is None or entry_price <= 0:
+            return None
+        quantity = max(int(self.order_quantity), 1)
+        prop_cost = max(float(self.cost), 0.0)
+        if prop_cost >= 1.0:
+            return None
+        target_profit = max(
+            self.min_sell_profit,
+            self.min_sell_profit_per_share * quantity,
+        )
+        required_proceeds = (
+            entry_price * quantity * (1.0 + prop_cost)
+            + self.fixed_buy_fee
+            + self.fixed_sell_fee
+            + target_profit
+        )
+        raw_limit = required_proceeds / (quantity * (1.0 - prop_cost))
+        return np.ceil(raw_limit * 100.0) / 100.0
+
+    def _live_long_sell_signal(self, bar, data):
+        """Causal sell decision from actual filled anchor, not virtual trades."""
+        result = {"sell_now": False, "reason": ""}
+        if self.initial_avg_cost is None or self.initial_avg_cost <= 0:
+            return result
+        if not self.bars:
+            return result
+
+        mids = np.asarray(
+            [self.initial_avg_cost] + [b.close_mid for b in self.bars],
+            dtype=float,
+        )
+        peak_mid = float(np.max(mids))
+        current_mid = float(bar.close_mid)
+        current_bid = float(bar.close_bid)
+        floor = self._minimum_profitable_sell_price()
+        floor_ok = floor is None or current_bid >= floor
+
+        trail_drawdown = np.log(peak_mid) - np.log(current_mid)
+        trailing_exit = (
+            self.trailing_stop is not None
+            and trail_drawdown >= self.trailing_stop
+        )
+
+        t = int(data["N"])
+        z = data["Zsig"][t]
+        lp = np.log([b.close_mid for b in self._bars_for_strategy()])
+        d = min(self.delta, max(1, len(lp) - 2))
+        momentum = lp[t] - lp[t - d] if t >= d else np.nan
+        funnel_exit = (
+            t >= d + 1
+            and not np.isnan(z)
+            and z > self.k
+            and not np.isnan(momentum)
+            and momentum <= 0.0
+        )
+
+        if trailing_exit or funnel_exit:
+            reason = "Trailing exit" if trailing_exit else "Funnel exit"
+            threshold = peak_mid * np.exp(-float(self.trailing_stop or 0.0))
+            if floor_ok:
+                result["sell_now"] = True
+                floor_text = f"{floor:.2f}" if floor is not None else "n/a"
+                result["reason"] = (
+                    f"{reason}: bid {current_bid:.2f}, "
+                    f"floor {floor_text}, "
+                    f"trail threshold {threshold:.2f}."
+                )
+            elif floor is not None:
+                result["reason"] = (
+                    f"{reason} active, but bid {current_bid:.2f} is below "
+                    f"profit floor {floor:.2f}."
+                )
+        return result
 
     def _check_guards(self, bar, quote_age_seconds):
         if self.regular_hours_only and not self._is_regular_hours(bar.timestamp):

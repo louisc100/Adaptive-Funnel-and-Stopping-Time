@@ -855,24 +855,9 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
             z_x = mx
             z_y = [data["Zsig"][i] for i in mi]
 
-        buy_x = [
-            strategy.strategy_x_to_display_x(x)
-            for x in data["buy_times"]
-        ]
-        # The research engine starts from an internal reference buy at t=1.
-        # In account-aware cash mode that is not a live buy signal, so hide it.
-        if getattr(strategy, "initial_position", None) is not None:
-            buy_x = [x for x in buy_x if x != strategy.strategy_x_to_display_x(1)]
-        buy_x = [x for x in buy_x if start <= x < t_end]
-        sell_x = [
-            strategy.strategy_x_to_display_x(x)
-            for x in data["sell_times"]
-            if start <= strategy.strategy_x_to_display_x(x) < t_end
-        ]
-        if buy_x:
-            ax_p.scatter(buy_x, [display_prices[x] for x in buy_x], marker="^", s=55, color="#22c55e", label="Strategy buy")
-        if sell_x:
-            ax_p.scatter(sell_x, [display_prices[x] for x in sell_x], marker="v", s=55, color="#ef4444", label="Strategy sell")
+        # Live plots show only broker-confirmed fills as trade markers. The
+        # research engine can emit virtual buy/sell times while recomputing
+        # diagnostics, but those are not orders and should not appear here.
 
     filled_markers = getattr(strategy, "filled_markers", [])
     filled_buys = [
