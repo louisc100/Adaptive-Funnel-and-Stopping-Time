@@ -508,6 +508,11 @@ class LiveDryRunStrategy:
             self._initial_buy_emitted = True
             # A filled buy creates a fresh tau_b anchor for subsequent sell logic.
             fill_index = max(len(self.display_bars) - 1, 0)
+            if price is not None and price > 0 and 0 <= fill_index < len(self.display_funnel_mid):
+                self.display_funnel_mid[fill_index] = price
+                self.display_funnel_up[fill_index] = price
+                self.display_funnel_low[fill_index] = price
+                self.display_z[fill_index] = 0.0
             self.bars = []
             self.cycle_start_display_index = len(self.display_bars)
             self.latest_data = None
@@ -529,6 +534,11 @@ class LiveDryRunStrategy:
                 self.initial_avg_cost = None
                 # A filled sell creates tau_s for cash re-entry logic.
                 if price is not None and price > 0:
+                    if 0 <= marker_index < len(self.display_funnel_mid):
+                        self.display_funnel_mid[marker_index] = price
+                        self.display_funnel_up[marker_index] = price
+                        self.display_funnel_low[marker_index] = price
+                        self.display_z[marker_index] = 0.0
                     self.cash_anchor_price = price
                     self.cash_anchor_timestamp = (
                         self.display_bars[-1].timestamp if self.display_bars else None
