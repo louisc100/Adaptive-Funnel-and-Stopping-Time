@@ -645,12 +645,27 @@ class LiveDryRunStrategy:
             "funnel_low": np.full(n, np.nan),
             "trade_log": [],
         }
-        center = lp[ref_t] + drift
-        width = self.k * denom
-        data["Zsig"][t] = z
-        data["funnel_mid"][t] = np.exp(center)
-        data["funnel_up"][t] = np.exp(center + width)
-        data["funnel_low"][t] = np.exp(center - width)
+        data["funnel_mid"][0] = np.exp(lp[0])
+        data["funnel_up"][0] = np.exp(lp[0])
+        data["funnel_low"][0] = np.exp(lp[0])
+        data["Zsig"][0] = 0.0
+        for i in range(1, n):
+            ref_i = 0
+            if self.max_funnel_lookback is not None and i > self.max_funnel_lookback:
+                ref_i = i - self.max_funnel_lookback
+            drift_i = cumulative_drift[i] - cumulative_drift[ref_i]
+            var_i = cumulative_var[i] - cumulative_var[ref_i]
+            denom_i = np.sqrt(var_i)
+            center_i = lp[ref_i] + drift_i
+            width_i = self.k * denom_i
+            data["funnel_mid"][i] = np.exp(center_i)
+            data["funnel_up"][i] = np.exp(center_i + width_i)
+            data["funnel_low"][i] = np.exp(center_i - width_i)
+            data["Zsig"][i] = (
+                (lp[i] - lp[ref_i] - drift_i) / denom_i
+                if denom_i > 0
+                else np.nan
+            )
         self._update_display_overlays(data)
         return {"buy_now": buy_now, "data": data}
 
