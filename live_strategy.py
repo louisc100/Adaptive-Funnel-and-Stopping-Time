@@ -512,7 +512,8 @@ class LiveDryRunStrategy:
                 self.display_funnel_mid[fill_index] = price
                 self.display_funnel_up[fill_index] = price
                 self.display_funnel_low[fill_index] = price
-                self.display_z[fill_index] = 0.0
+                if np.isnan(self.display_z[fill_index]):
+                    self.display_z[fill_index] = 0.0
             self.bars = []
             self.cycle_start_display_index = len(self.display_bars)
             self.latest_data = None
@@ -538,7 +539,8 @@ class LiveDryRunStrategy:
                         self.display_funnel_mid[marker_index] = price
                         self.display_funnel_up[marker_index] = price
                         self.display_funnel_low[marker_index] = price
-                        self.display_z[marker_index] = 0.0
+                        if np.isnan(self.display_z[marker_index]):
+                            self.display_z[marker_index] = 0.0
                     self.cash_anchor_price = price
                     self.cash_anchor_timestamp = (
                         self.display_bars[-1].timestamp if self.display_bars else None
@@ -672,6 +674,14 @@ class LiveDryRunStrategy:
     def _update_display_overlays(self, data):
         strategy_end = int(data["N"]) + 1
         for strategy_index in range(strategy_end):
+            if (
+                self.initial_position is not None
+                and self.initial_position > 0
+                and self.initial_avg_cost is not None
+                and self.initial_avg_cost > 0
+                and strategy_index < 2
+            ):
+                continue
             display_index = self.strategy_x_to_display_x(strategy_index)
             if 0 <= display_index < len(self.display_bars):
                 self.display_funnel_mid[display_index] = data["funnel_mid"][strategy_index]
