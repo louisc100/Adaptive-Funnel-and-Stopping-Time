@@ -977,12 +977,18 @@ def _save_live_strategy_html_plot(strategy, signal, path):
     ]
 
     latest_data = getattr(strategy, "latest_data", None) or {}
+    sell_floor = None
+    if getattr(strategy, "initial_position", 0.0) and strategy.initial_position > 0:
+        floor_fn = getattr(strategy, "_minimum_profitable_sell_price", None)
+        if callable(floor_fn):
+            sell_floor = floor_fn()
     payload = {
         "symbol": getattr(strategy, "symbol", ""),
         "signal": None if signal is None else signal.signal,
         "position": None if signal is None else signal.position,
         "k": _json_float(latest_data.get("k")),
         "zTrend": _json_float(latest_data.get("trend_entry_z")),
+        "sellFloor": _json_float(sell_floor),
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
         "points": points,
         "markers": filled_markers,
@@ -1119,7 +1125,9 @@ def _save_live_strategy_html_plot(strategy, signal, path):
       <span><i class="swatch" style="background:#f59e0b"></i>Upper funnel</span>
       <span><i class="swatch" style="background:#7dd3fc"></i>Lower funnel</span>
       <span><i class="swatch" style="background:#cbd5e1"></i>Center</span>
+      <span><i class="swatch" style="background:#fb7185"></i>Profit floor</span>
       <span><i class="swatch" style="background:#14b8a6"></i>Z statistic</span>
+      <span style="color:#22c55e">● Latest price</span>
       <span style="color:#22c55e">▲ Filled buy</span>
       <span style="color:#ef4444">▼ Filled sell</span>
     </div>
@@ -1157,7 +1165,7 @@ let dragStartStart = 0;
 document.getElementById("title").textContent =
   `${{payload.symbol}} live strategy | ${{payload.signal || "n/a"}} | ${{payload.position || "n/a"}}`;
 document.getElementById("meta").textContent =
-  `Updated ${{payload.updatedAt}} | Bars ${{points.length}} | k=${{fmt(payload.k)}} | z_trend=${{fmt(payload.zTrend)}}`;
+  `Updated ${{payload.updatedAt}} | Bars ${{points.length}} | k=${{fmt(payload.k)}} | z_trend=${{fmt(payload.zTrend)}} | sell floor=${{fmt(payload.sellFloor)}}`;
 
 function fmt(value) {{
   return value === null || value === undefined ? "n/a" : Number(value).toFixed(4).replace(/0+$/, "").replace(/\\.$/, "");
@@ -1283,6 +1291,16 @@ function drawTriangle(x, y, up, color) {{
   ctx.stroke();
 }}
 
+function drawCircle(x, y, radius, color) {{
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#f8fafc";
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+}}
+
 function draw() {{
   resizeCanvas();
   const rect = canvas.getBoundingClientRect();
@@ -1300,6 +1318,7 @@ function draw() {{
   const xFor = x => left + ((x - start) / denom) * (right - left);
   const priceVals = [];
   vis.forEach(p => priceVals.push(p.mid, p.upper, p.lower, p.center));
+  if (payload.sellFloor !== null && payload.sellFloor !== undefined) priceVals.push(payload.sellFloor);
   const zVals = [];
   vis.forEach(p => zVals.push(p.z));
   if (payload.k !== null && payload.k !== undefined) zVals.push(payload.k, -payload.k);
@@ -1315,6 +1334,23 @@ function draw() {{
   line(vis.map(p => ({{x: p.x, value: p.lower}})), xFor, yPrice, "#7dd3fc", [7, 5]);
   line(vis.map(p => ({{x: p.x, value: p.center}})), xFor, yPrice, "#cbd5e1", [2, 5]);
   line(vis.map(p => ({{x: p.x, value: p.z}})), xFor, yZ, "#14b8a6");
+
+  function priceHline(value, color, label, dash=[]) {{
+    if (value === null || value === undefined) return;
+    const y = yPrice(value);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = "12px system-ui";
+    ctx.fillText(`${{label}} ${{fmt(value)}}`, right - 112, y - 5);
+  }}
+  priceHline(payload.sellFloor, "#fb7185", "floor", [2, 5]);
 
   function hline(value, color, label, dash=[]) {{
     if (value === null || value === undefined) return;
@@ -1339,12 +1375,22 @@ function draw() {{
     .filter(m => m.price !== null && m.x >= start && m.x < start + windowSize)
     .forEach(m => drawTriangle(xFor(m.x), yPrice(m.price), m.action === "BUY", m.action === "BUY" ? "#22c55e" : "#ef4444"));
 
+  const latest = points[points.length - 1];
+  if (
+    latest
+    && latest.mid !== null
+    && latest.mid !== undefined
+    && latest.x >= start
+    && latest.x < start + windowSize
+  ) {{
+    drawCircle(xFor(latest.x), yPrice(latest.mid), 6.5, "#22c55e");
+  }}
+
   ctx.fillStyle = "#e5eefc";
   ctx.font = "13px system-ui";
   ctx.fillText(`Bars ${{start}}-${{Math.min(points.length - 1, start + windowSize - 1)}} of ${{points.length - 1}}`, left, 22);
-  const last = points[points.length - 1];
   ctx.fillStyle = "#94a3b8";
-  ctx.fillText(`Latest mid ${{fmt(last.mid)}} | bid ${{fmt(last.bid)}} | ask ${{fmt(last.ask)}}`, right - 280, 22);
+  ctx.fillText(`Latest mid ${{fmt(latest.mid)}} | bid ${{fmt(latest.bid)}} | ask ${{fmt(latest.ask)}}`, right - 280, 22);
   ctx.textAlign = "center";
   ctx.fillText("Completed live bar index", (left + right) / 2, rect.height - 14);
   ctx.textAlign = "left";
