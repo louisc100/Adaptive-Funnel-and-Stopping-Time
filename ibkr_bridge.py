@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import select
 import sys
@@ -930,6 +931,491 @@ def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     canvas.draw()
 
 
+def _json_float(value):
+    """Return JSON-safe float values, preserving missing values as null."""
+    value = _safe_float(value)
+    return None if value is None else value
+
+
+def _save_live_strategy_html_plot(strategy, signal, path):
+    """Save a self-contained browser plot with pan/zoom over all live bars."""
+    display_bars = getattr(strategy, "display_bars", [])
+    if not display_bars:
+        return
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    points = []
+    display_funnel_mid = getattr(strategy, "display_funnel_mid", [])
+    display_funnel_up = getattr(strategy, "display_funnel_up", [])
+    display_funnel_low = getattr(strategy, "display_funnel_low", [])
+    display_z = getattr(strategy, "display_z", [])
+    for i, bar in enumerate(display_bars):
+        points.append({
+            "x": i,
+            "timestamp": bar.timestamp,
+            "mid": _json_float(bar.close_mid),
+            "bid": _json_float(bar.close_bid),
+            "ask": _json_float(bar.close_ask),
+            "upper": _json_float(display_funnel_up[i]) if i < len(display_funnel_up) else None,
+            "lower": _json_float(display_funnel_low[i]) if i < len(display_funnel_low) else None,
+            "center": _json_float(display_funnel_mid[i]) if i < len(display_funnel_mid) else None,
+            "z": _json_float(display_z[i]) if i < len(display_z) else None,
+        })
+
+    filled_markers = [
+        {
+            "x": int(marker.get("index", 0)),
+            "action": str(marker.get("action", "")).upper(),
+            "price": _json_float(marker.get("price")),
+            "quantity": _json_float(marker.get("quantity")),
+            "timestamp": marker.get("timestamp", ""),
+        }
+        for marker in getattr(strategy, "filled_markers", [])
+        if marker.get("price") is not None
+    ]
+
+    latest_data = getattr(strategy, "latest_data", None) or {}
+    payload = {
+        "symbol": getattr(strategy, "symbol", ""),
+        "signal": None if signal is None else signal.signal,
+        "position": None if signal is None else signal.position,
+        "k": _json_float(latest_data.get("k")),
+        "zTrend": _json_float(latest_data.get("trend_entry_z")),
+        "updatedAt": datetime.now().isoformat(timespec="seconds"),
+        "points": points,
+        "markers": filled_markers,
+    }
+
+    payload_json = json.dumps(payload, allow_nan=False)
+    html = f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{payload['symbol']} Live Strategy Plot</title>
+<style>
+  :root {{
+    --bg: #0b1018;
+    --panel: #111827;
+    --grid: #283244;
+    --text: #e5eefc;
+    --muted: #94a3b8;
+    --blue: #60a5fa;
+    --orange: #f59e0b;
+    --cyan: #7dd3fc;
+    --green: #22c55e;
+    --red: #ef4444;
+  }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0;
+    background: radial-gradient(circle at top left, #172033, var(--bg) 48%);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }}
+  main {{
+    width: min(1500px, 100vw);
+    margin: 0 auto;
+    padding: 18px;
+  }}
+  .topbar {{
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+  }}
+  h1 {{
+    margin: 0;
+    font-size: 22px;
+    letter-spacing: 0.02em;
+  }}
+  .meta {{
+    color: var(--muted);
+    font-size: 13px;
+  }}
+  .chart-card {{
+    background: rgba(17, 24, 39, 0.92);
+    border: 1px solid #263244;
+    border-radius: 18px;
+    box-shadow: 0 18px 55px rgba(0, 0, 0, 0.35);
+    padding: 14px;
+  }}
+  canvas {{
+    width: 100%;
+    height: 680px;
+    display: block;
+    background: #0f1724;
+    border-radius: 12px;
+    cursor: grab;
+  }}
+  canvas:active {{ cursor: grabbing; }}
+  .controls {{
+    display: grid;
+    grid-template-columns: 1fr auto auto auto auto;
+    gap: 10px;
+    align-items: center;
+    margin-top: 12px;
+  }}
+  input[type="range"] {{ width: 100%; }}
+  button {{
+    color: var(--text);
+    background: #1f2937;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 8px 11px;
+    cursor: pointer;
+  }}
+  button:hover {{ background: #273449; }}
+  label {{
+    color: var(--muted);
+    font-size: 13px;
+    white-space: nowrap;
+  }}
+  .legend {{
+    display: flex;
+    flex-wrap: wrap;
+    gap: 13px;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 13px;
+  }}
+  .swatch {{
+    display: inline-block;
+    width: 12px;
+    height: 3px;
+    margin-right: 5px;
+    vertical-align: middle;
+  }}
+  @media (max-width: 800px) {{
+    canvas {{ height: 520px; }}
+    .controls {{ grid-template-columns: 1fr 1fr; }}
+  }}
+</style>
+</head>
+<body>
+<main>
+  <div class="topbar">
+    <div>
+      <h1 id="title"></h1>
+      <div class="meta" id="meta"></div>
+    </div>
+    <div class="meta">Drag to pan. Mouse wheel or trackpad scroll to zoom. Slider jumps through history.</div>
+  </div>
+  <section class="chart-card">
+    <canvas id="chart"></canvas>
+    <div class="controls">
+      <input id="range" type="range" min="0" value="0" step="1">
+      <button id="zoomIn">Zoom in</button>
+      <button id="zoomOut">Zoom out</button>
+      <button id="latest">Latest</button>
+      <label><input id="autoRefresh" type="checkbox" checked> Auto-refresh</label>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:#60a5fa"></i>Mid</span>
+      <span><i class="swatch" style="background:#f59e0b"></i>Upper funnel</span>
+      <span><i class="swatch" style="background:#7dd3fc"></i>Lower funnel</span>
+      <span><i class="swatch" style="background:#cbd5e1"></i>Center</span>
+      <span><i class="swatch" style="background:#14b8a6"></i>Z statistic</span>
+      <span style="color:#22c55e">▲ Filled buy</span>
+      <span style="color:#ef4444">▼ Filled sell</span>
+    </div>
+  </section>
+</main>
+<script>
+const payload = {payload_json};
+const canvas = document.getElementById("chart");
+const ctx = canvas.getContext("2d");
+const range = document.getElementById("range");
+const autoRefresh = document.getElementById("autoRefresh");
+const points = payload.points || [];
+const markers = payload.markers || [];
+const storageKey = `ibkrLivePlot:${{payload.symbol}}`;
+const storedView = (() => {{
+  try {{
+    return JSON.parse(localStorage.getItem(storageKey) || "{{}}");
+  }} catch (_) {{
+    return {{}};
+  }}
+}})();
+let windowSize = Math.min(Math.max(120, Math.floor(points.length * 0.35)), Math.max(points.length, 1));
+if (Number.isFinite(storedView.windowSize)) {{
+  windowSize = Math.max(20, Math.min(points.length || 1, Math.round(storedView.windowSize)));
+}}
+let followLatest = storedView.followLatest !== false;
+let start = followLatest
+  ? Math.max(0, points.length - windowSize)
+  : Math.max(0, Math.min(Number(storedView.start || 0), Math.max(0, points.length - windowSize)));
+autoRefresh.checked = storedView.autoRefresh !== false;
+let dragging = false;
+let dragStartX = 0;
+let dragStartStart = 0;
+
+document.getElementById("title").textContent =
+  `${{payload.symbol}} live strategy | ${{payload.signal || "n/a"}} | ${{payload.position || "n/a"}}`;
+document.getElementById("meta").textContent =
+  `Updated ${{payload.updatedAt}} | Bars ${{points.length}} | k=${{fmt(payload.k)}} | z_trend=${{fmt(payload.zTrend)}}`;
+
+function fmt(value) {{
+  return value === null || value === undefined ? "n/a" : Number(value).toFixed(4).replace(/0+$/, "").replace(/\\.$/, "");
+}}
+
+function resizeCanvas() {{
+  const ratio = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.floor(rect.width * ratio);
+  canvas.height = Math.floor(rect.height * ratio);
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+}}
+
+function visiblePoints() {{
+  const end = Math.min(points.length, start + windowSize);
+  return points.slice(start, end);
+}}
+
+function finite(values) {{
+  return values.filter(v => v !== null && v !== undefined && Number.isFinite(v));
+}}
+
+function yScale(values, top, bottom) {{
+  const vals = finite(values);
+  let min = vals.length ? Math.min(...vals) : 0;
+  let max = vals.length ? Math.max(...vals) : 1;
+  if (Math.abs(max - min) < 1e-9) {{
+    max += 1;
+    min -= 1;
+  }}
+  const pad = (max - min) * 0.08;
+  min -= pad;
+  max += pad;
+  const scale = value => bottom - ((value - min) / (max - min)) * (bottom - top);
+  scale.min = min;
+  scale.max = max;
+  return scale;
+}}
+
+function drawGrid(left, top, right, bottom, yFor=null, xStart=null, xEnd=null) {{
+  ctx.strokeStyle = "#283244";
+  ctx.lineWidth = 1;
+  ctx.fillStyle = "#94a3b8";
+  ctx.font = "12px system-ui";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  for (let i = 0; i <= 5; i++) {{
+    const y = top + (bottom - top) * i / 5;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    if (yFor) {{
+      const value = yFor.max - (yFor.max - yFor.min) * i / 5;
+      ctx.fillText(fmtAxis(value), left - 8, y);
+    }}
+  }}
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  for (let i = 0; i <= 8; i++) {{
+    const x = left + (right - left) * i / 8;
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, bottom);
+    ctx.stroke();
+    if (xStart !== null && xEnd !== null) {{
+      const label = Math.round(xStart + (xEnd - xStart) * i / 8);
+      ctx.fillText(String(label), x, bottom + 7);
+    }}
+  }}
+  ctx.textAlign = "left";
+  ctx.textBaseline = "alphabetic";
+}}
+
+function fmtAxis(value) {{
+  const absValue = Math.abs(value);
+  if (absValue >= 100) return value.toFixed(2);
+  if (absValue >= 10) return value.toFixed(3).replace(/0+$/, "").replace(/\\.$/, "");
+  return value.toFixed(4).replace(/0+$/, "").replace(/\\.$/, "");
+}}
+
+function line(series, xFor, yFor, color, dash=[]) {{
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.setLineDash(dash);
+  ctx.beginPath();
+  let active = false;
+  series.forEach(p => {{
+    const yv = p.value;
+    if (yv === null || yv === undefined || !Number.isFinite(yv)) {{
+      active = false;
+      return;
+    }}
+    const x = xFor(p.x);
+    const y = yFor(yv);
+    if (!active) {{
+      ctx.moveTo(x, y);
+      active = true;
+    }} else {{
+      ctx.lineTo(x, y);
+    }}
+  }});
+  ctx.stroke();
+  ctx.setLineDash([]);
+}}
+
+function drawTriangle(x, y, up, color) {{
+  ctx.fillStyle = color;
+  ctx.strokeStyle = "#f8fafc";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (up) {{
+    ctx.moveTo(x, y - 9);
+    ctx.lineTo(x - 8, y + 7);
+    ctx.lineTo(x + 8, y + 7);
+  }} else {{
+    ctx.moveTo(x, y + 9);
+    ctx.lineTo(x - 8, y - 7);
+    ctx.lineTo(x + 8, y - 7);
+  }}
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+}}
+
+function draw() {{
+  resizeCanvas();
+  const rect = canvas.getBoundingClientRect();
+  ctx.clearRect(0, 0, rect.width, rect.height);
+  if (!points.length) return;
+  range.max = Math.max(0, points.length - windowSize);
+  range.value = start;
+
+  const left = 76, right = rect.width - 24;
+  const priceTop = 34, priceBottom = Math.floor(rect.height * 0.63);
+  const zTop = priceBottom + 62, zBottom = rect.height - 50;
+  const vis = visiblePoints();
+  const xEnd = Math.min(points.length - 1, start + windowSize - 1);
+  const denom = Math.max(vis.length - 1, 1);
+  const xFor = x => left + ((x - start) / denom) * (right - left);
+  const priceVals = [];
+  vis.forEach(p => priceVals.push(p.mid, p.upper, p.lower, p.center));
+  const zVals = [];
+  vis.forEach(p => zVals.push(p.z));
+  if (payload.k !== null && payload.k !== undefined) zVals.push(payload.k, -payload.k);
+  if (payload.zTrend !== null && payload.zTrend !== undefined) zVals.push(payload.zTrend);
+  const yPrice = yScale(priceVals, priceTop, priceBottom);
+  const yZ = yScale(zVals, zTop, zBottom);
+
+  drawGrid(left, priceTop, right, priceBottom, yPrice, start, xEnd);
+  drawGrid(left, zTop, right, zBottom, yZ, start, xEnd);
+
+  line(vis.map(p => ({{x: p.x, value: p.mid}})), xFor, yPrice, "#60a5fa");
+  line(vis.map(p => ({{x: p.x, value: p.upper}})), xFor, yPrice, "#f59e0b", [7, 5]);
+  line(vis.map(p => ({{x: p.x, value: p.lower}})), xFor, yPrice, "#7dd3fc", [7, 5]);
+  line(vis.map(p => ({{x: p.x, value: p.center}})), xFor, yPrice, "#cbd5e1", [2, 5]);
+  line(vis.map(p => ({{x: p.x, value: p.z}})), xFor, yZ, "#14b8a6");
+
+  function hline(value, color, label, dash=[]) {{
+    if (value === null || value === undefined) return;
+    const y = yZ(value);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.4;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(right, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = "12px system-ui";
+    ctx.fillText(label, right - 56, y - 5);
+  }}
+  hline(payload.k, "#ef4444", "+k", [7, 5]);
+  hline(payload.k === null || payload.k === undefined ? null : -payload.k, "#22c55e", "-k", [7, 5]);
+  hline(payload.zTrend, "#f59e0b", "z_trend", [2, 5]);
+
+  markers
+    .filter(m => m.price !== null && m.x >= start && m.x < start + windowSize)
+    .forEach(m => drawTriangle(xFor(m.x), yPrice(m.price), m.action === "BUY", m.action === "BUY" ? "#22c55e" : "#ef4444"));
+
+  ctx.fillStyle = "#e5eefc";
+  ctx.font = "13px system-ui";
+  ctx.fillText(`Bars ${{start}}-${{Math.min(points.length - 1, start + windowSize - 1)}} of ${{points.length - 1}}`, left, 22);
+  const last = points[points.length - 1];
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText(`Latest mid ${{fmt(last.mid)}} | bid ${{fmt(last.bid)}} | ask ${{fmt(last.ask)}}`, right - 280, 22);
+  ctx.textAlign = "center";
+  ctx.fillText("Completed live bar index", (left + right) / 2, rect.height - 14);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#94a3b8";
+  ctx.fillText("Price", 12, priceTop + 18);
+  ctx.fillText("Z", 26, zTop + 18);
+}}
+
+function setStart(value) {{
+  const maxStart = Math.max(0, points.length - windowSize);
+  start = Math.max(0, Math.min(Number(value), maxStart));
+  followLatest = start >= maxStart - 1;
+  saveViewState();
+  draw();
+}}
+
+function zoom(factor) {{
+  const center = start + windowSize / 2;
+  windowSize = Math.max(20, Math.min(points.length || 1, Math.round(windowSize * factor)));
+  setStart(Math.round(center - windowSize / 2));
+}}
+
+function saveViewState() {{
+  localStorage.setItem(storageKey, JSON.stringify({{
+    start,
+    windowSize,
+    followLatest,
+    autoRefresh: autoRefresh.checked
+  }}));
+}}
+
+range.addEventListener("input", e => setStart(e.target.value));
+document.getElementById("zoomIn").addEventListener("click", () => zoom(0.7));
+document.getElementById("zoomOut").addEventListener("click", () => zoom(1.35));
+document.getElementById("latest").addEventListener("click", () => {{
+  followLatest = true;
+  setStart(Math.max(0, points.length - windowSize));
+}});
+autoRefresh.addEventListener("change", saveViewState);
+canvas.addEventListener("wheel", e => {{
+  e.preventDefault();
+  zoom(e.deltaY < 0 ? 0.82 : 1.18);
+}}, {{passive: false}});
+canvas.addEventListener("mousedown", e => {{
+  dragging = true;
+  dragStartX = e.clientX;
+  dragStartStart = start;
+}});
+window.addEventListener("mouseup", () => dragging = false);
+window.addEventListener("mousemove", e => {{
+  if (!dragging) return;
+  const rect = canvas.getBoundingClientRect();
+  const dx = e.clientX - dragStartX;
+  const barsMoved = Math.round(-dx / Math.max(rect.width - 82, 1) * windowSize);
+  setStart(dragStartStart + barsMoved);
+}});
+window.addEventListener("resize", draw);
+setInterval(() => {{
+  saveViewState();
+  if (autoRefresh.checked) {{
+    window.location.reload();
+  }}
+}}, 20000);
+draw();
+</script>
+</body>
+</html>
+"""
+    path.write_text(html, encoding="utf-8")
+
+
 def fetch_stock_quote(
     symbol=DEFAULT_SYMBOL,
     host=DEFAULT_HOST,
@@ -1002,6 +1488,7 @@ def watch_stock_quote(
     strategy_kwargs=None,
     signal_log_path=None,
     live_plot_path=None,
+    live_plot_html_path=None,
     plot_window_bars=120,
     manual_orders=False,
     auto_orders=False,
@@ -1080,6 +1567,8 @@ def watch_stock_quote(
             print(f"Logging strategy signals to {signal_log_path}")
         if live_plot_path:
             print(f"Refreshing live strategy plot at {live_plot_path}")
+        if live_plot_html_path:
+            print(f"Refreshing interactive live strategy plot at {live_plot_html_path}")
         if interactive_orders:
             print(
                 "Interactive overrides enabled. Type commands like "
@@ -1114,6 +1603,12 @@ def watch_stock_quote(
                         live_plot_path,
                         window_bars=plot_window_bars,
                     )
+                if live_plot_html_path and fill_events:
+                    _save_live_strategy_html_plot(
+                        strategy,
+                        signal if "signal" in locals() else None,
+                        live_plot_html_path,
+                    )
                 if stop_for_fill:
                     should_stop = True
                 if (
@@ -1127,6 +1622,17 @@ def watch_stock_quote(
                         signal,
                         live_plot_path,
                         window_bars=plot_window_bars,
+                    )
+                if (
+                    live_plot_html_path
+                    and not fill_events
+                    and "signal" in locals()
+                    and getattr(strategy, "latest_data", None) is not None
+                ):
+                    _save_live_strategy_html_plot(
+                        strategy,
+                        signal,
+                        live_plot_html_path,
                     )
             if interactive_orders:
                 command = _read_interactive_order_command()
@@ -1167,6 +1673,12 @@ def watch_stock_quote(
                             signal,
                             live_plot_path,
                             window_bars=plot_window_bars,
+                        )
+                    if live_plot_html_path:
+                        _save_live_strategy_html_plot(
+                            strategy,
+                            signal,
+                            live_plot_html_path,
                         )
                     if (manual_orders or auto_orders) and not pending_trades:
                         trade = _handle_order_signal(
@@ -1387,6 +1899,11 @@ def parse_args(argv):
         help="Optional PNG path refreshed after each completed strategy bar.",
     )
     parser.add_argument(
+        "--live-plot-html",
+        default=None,
+        help="Optional self-contained HTML path with an interactive all-history live plot.",
+    )
+    parser.add_argument(
         "--plot-window-bars",
         type=int,
         default=120,
@@ -1598,6 +2115,7 @@ def main(argv=None):
                 },
                 signal_log_path=args.signal_log,
                 live_plot_path=args.live_plot,
+                live_plot_html_path=args.live_plot_html,
                 plot_window_bars=args.plot_window_bars,
                 manual_orders=args.manual_orders,
                 auto_orders=args.auto_orders,
