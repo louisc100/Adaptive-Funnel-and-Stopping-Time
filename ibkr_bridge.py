@@ -797,6 +797,25 @@ def _fill_event_to_signal_row(fill_event, row, strategy):
     }
 
 
+def _load_strategy_state(path):
+    path = Path(path)
+    if not path.exists():
+        return None
+    with path.open("r", encoding="utf-8") as file_obj:
+        return json.load(file_obj)
+
+
+def _save_strategy_state(strategy, path):
+    if strategy is None or path is None:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as file_obj:
+        json.dump(strategy.export_state(), file_obj, indent=2, sort_keys=True)
+    tmp_path.replace(path)
+
+
 def _save_live_strategy_plot(strategy, signal, path, window_bars=120):
     """Save a refreshed live plot of mid-price, funnel, and Z statistic."""
     data = getattr(strategy, "latest_data", None)
@@ -1535,6 +1554,8 @@ def watch_stock_quote(
     signal_log_path=None,
     live_plot_path=None,
     live_plot_html_path=None,
+    strategy_state_path=None,
+    resume_strategy_state=False,
     plot_window_bars=120,
     manual_orders=False,
     auto_orders=False,
@@ -1583,6 +1604,26 @@ def watch_stock_quote(
         )
         bar_builder = MidBarBuilder(bar_seconds=bar_seconds)
         strategy = LiveDryRunStrategy(symbol=symbol, **(strategy_kwargs or {}))
+        if resume_strategy_state and strategy_state_path:
+            state = _load_strategy_state(strategy_state_path)
+            if state is None:
+                print(f"No previous strategy state found at {strategy_state_path}; starting fresh.")
+            else:
+                strategy.import_state(
+                    state,
+                    account_position=(strategy_kwargs or {}).get("initial_position"),
+                    account_avg_cost=(strategy_kwargs or {}).get("initial_avg_cost"),
+                )
+                floor_fn = getattr(strategy, "_minimum_profitable_sell_price", None)
+                floor = floor_fn() if callable(floor_fn) else None
+                print(
+                    "Resumed strategy state: "
+                    f"display_bars={len(strategy.display_bars)}, "
+                    f"cycle_bars={len(strategy.bars)}, "
+                    f"position={_format_quantity(strategy.initial_position)}, "
+                    f"anchor={_format_price(strategy.initial_avg_cost)}, "
+                    f"sell_floor={_format_price(floor)}"
+                )
         if signal_log_path:
             signal_log_file, signal_log_writer = _open_signal_log(signal_log_path)
 
@@ -1615,6 +1656,8 @@ def watch_stock_quote(
             print(f"Refreshing live strategy plot at {live_plot_path}")
         if live_plot_html_path:
             print(f"Refreshing interactive live strategy plot at {live_plot_html_path}")
+        if strategy_state_path:
+            print(f"Saving live strategy state to {strategy_state_path}")
         if interactive_orders:
             print(
                 "Interactive overrides enabled. Type commands like "
@@ -1655,6 +1698,8 @@ def watch_stock_quote(
                         signal if "signal" in locals() else None,
                         live_plot_html_path,
                     )
+                if strategy_state_path and fill_events:
+                    _save_strategy_state(strategy, strategy_state_path)
                 if stop_for_fill:
                     should_stop = True
                 if (
@@ -1680,6 +1725,12 @@ def watch_stock_quote(
                         signal,
                         live_plot_html_path,
                     )
+                if (
+                    strategy_state_path
+                    and not fill_events
+                    and getattr(strategy, "latest_data", None) is not None
+                ):
+                    _save_strategy_state(strategy, strategy_state_path)
             if interactive_orders:
                 command = _read_interactive_order_command()
                 if command:
@@ -1726,6 +1777,8 @@ def watch_stock_quote(
                             signal,
                             live_plot_html_path,
                         )
+                    if strategy_state_path:
+                        _save_strategy_state(strategy, strategy_state_path)
                     if (manual_orders or auto_orders) and not pending_trades:
                         trade = _handle_order_signal(
                             ib,
@@ -1950,6 +2003,16 @@ def parse_args(argv):
         help="Optional self-contained HTML path with an interactive all-history live plot.",
     )
     parser.add_argument(
+        "--strategy-state",
+        default=None,
+        help="Optional JSON path for saving restartable live strategy state.",
+    )
+    parser.add_argument(
+        "--resume-strategy-state",
+        action="store_true",
+        help="Load --strategy-state at startup and continue the prior live cycle.",
+    )
+    parser.add_argument(
         "--plot-window-bars",
         type=int,
         default=120,
@@ -2073,6 +2136,9 @@ def main(argv=None):
         return 0
 
     if args.watch or args.dry_run_strategy:
+        if args.resume_strategy_state and not args.strategy_state:
+            print("--resume-strategy-state requires --strategy-state PATH.")
+            return 1
         if args.manual_orders and not args.dry_run_strategy:
             print("--manual-orders requires --dry-run-strategy.")
             return 1
@@ -2162,6 +2228,8 @@ def main(argv=None):
                 signal_log_path=args.signal_log,
                 live_plot_path=args.live_plot,
                 live_plot_html_path=args.live_plot_html,
+                strategy_state_path=args.strategy_state,
+                resume_strategy_state=args.resume_strategy_state,
                 plot_window_bars=args.plot_window_bars,
                 manual_orders=args.manual_orders,
                 auto_orders=args.auto_orders,

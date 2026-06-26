@@ -708,6 +708,154 @@ class LiveDryRunStrategy:
             anchor_count = 1
         return self.cycle_start_display_index + int(strategy_index) - anchor_count
 
+    @staticmethod
+    def _clean_float(value):
+        if value is None:
+            return None
+        value = float(value)
+        if np.isnan(value) or np.isinf(value):
+            return None
+        return value
+
+    @classmethod
+    def _bar_to_dict(cls, bar):
+        return {
+            "timestamp": bar.timestamp,
+            "open_mid": cls._clean_float(bar.open_mid),
+            "high_mid": cls._clean_float(bar.high_mid),
+            "low_mid": cls._clean_float(bar.low_mid),
+            "close_mid": cls._clean_float(bar.close_mid),
+            "close_bid": cls._clean_float(bar.close_bid),
+            "close_ask": cls._clean_float(bar.close_ask),
+            "avg_spread_bps": cls._clean_float(bar.avg_spread_bps),
+        }
+
+    @classmethod
+    def _bar_from_dict(cls, data):
+        return MidBar(
+            timestamp=str(data["timestamp"]),
+            open_mid=float(data["open_mid"]),
+            high_mid=float(data["high_mid"]),
+            low_mid=float(data["low_mid"]),
+            close_mid=float(data["close_mid"]),
+            close_bid=float(data["close_bid"]),
+            close_ask=float(data["close_ask"]),
+            avg_spread_bps=float(data.get("avg_spread_bps") or 0.0),
+        )
+
+    @classmethod
+    def _series_to_json(cls, values):
+        return [cls._clean_float(value) for value in values]
+
+    @staticmethod
+    def _series_from_json(values):
+        return [np.nan if value is None else float(value) for value in values]
+
+    def export_state(self):
+        """Return JSON-safe live state needed to continue after restart."""
+        return {
+            "version": 1,
+            "symbol": self.symbol,
+            "params": {
+                "k": self.k,
+                "delta": self.delta,
+                "entry_delta": self.entry_delta,
+                "cost": self.cost,
+                "drift_process_var": self.drift_process_var,
+                "max_funnel_lookback": self.max_funnel_lookback,
+                "trailing_stop": self.trailing_stop,
+                "trend_entry_z": self.trend_entry_z,
+                "fixed_buy_fee": self.fixed_buy_fee,
+                "fixed_sell_fee": self.fixed_sell_fee,
+                "min_sell_profit": self.min_sell_profit,
+                "min_sell_profit_per_share": self.min_sell_profit_per_share,
+                "order_quantity": self.order_quantity,
+            },
+            "initial_position": self._clean_float(self.initial_position),
+            "initial_avg_cost": self._clean_float(self.initial_avg_cost),
+            "initial_buy_emitted": bool(self._initial_buy_emitted),
+            "bars": [self._bar_to_dict(bar) for bar in self.bars],
+            "display_bars": [self._bar_to_dict(bar) for bar in self.display_bars],
+            "display_funnel_mid": self._series_to_json(self.display_funnel_mid),
+            "display_funnel_up": self._series_to_json(self.display_funnel_up),
+            "display_funnel_low": self._series_to_json(self.display_funnel_low),
+            "display_z": self._series_to_json(self.display_z),
+            "cycle_start_display_index": int(self.cycle_start_display_index),
+            "filled_markers": list(self.filled_markers),
+            "cash_anchor_price": self._clean_float(self.cash_anchor_price),
+            "cash_anchor_timestamp": self.cash_anchor_timestamp,
+            "last_live_exit_reason": self.last_live_exit_reason,
+        }
+
+    def import_state(self, state, account_position=None, account_avg_cost=None):
+        """Restore live state, then reconcile position with current broker state."""
+        if not state:
+            return
+        saved_symbol = str(state.get("symbol", "")).upper()
+        if saved_symbol and saved_symbol != self.symbol:
+            raise ValueError(
+                f"State symbol {saved_symbol} does not match requested symbol {self.symbol}."
+            )
+
+        self.initial_position = state.get("initial_position")
+        self.initial_position = (
+            None if self.initial_position is None else float(self.initial_position)
+        )
+        self.initial_avg_cost = state.get("initial_avg_cost")
+        self.initial_avg_cost = (
+            None if self.initial_avg_cost is None else float(self.initial_avg_cost)
+        )
+        self._initial_buy_emitted = bool(state.get("initial_buy_emitted", False))
+        self.bars = [self._bar_from_dict(item) for item in state.get("bars", [])]
+        self.display_bars = [
+            self._bar_from_dict(item) for item in state.get("display_bars", [])
+        ]
+        self.display_funnel_mid = self._series_from_json(
+            state.get("display_funnel_mid", [])
+        )
+        self.display_funnel_up = self._series_from_json(
+            state.get("display_funnel_up", [])
+        )
+        self.display_funnel_low = self._series_from_json(
+            state.get("display_funnel_low", [])
+        )
+        self.display_z = self._series_from_json(state.get("display_z", []))
+        self.cycle_start_display_index = int(
+            state.get("cycle_start_display_index", 0)
+        )
+        self.filled_markers = list(state.get("filled_markers", []))
+        self.cash_anchor_price = state.get("cash_anchor_price")
+        self.cash_anchor_price = (
+            None if self.cash_anchor_price is None else float(self.cash_anchor_price)
+        )
+        self.cash_anchor_timestamp = state.get("cash_anchor_timestamp")
+        self.last_live_exit_reason = state.get("last_live_exit_reason", "")
+        self.latest_data = None
+
+        n_display = len(self.display_bars)
+        for attr in (
+            "display_funnel_mid",
+            "display_funnel_up",
+            "display_funnel_low",
+            "display_z",
+        ):
+            series = getattr(self, attr)
+            if len(series) < n_display:
+                series.extend([np.nan] * (n_display - len(series)))
+            elif len(series) > n_display:
+                del series[n_display:]
+
+        if account_position is not None:
+            account_position = float(account_position)
+            self.initial_position = account_position
+            if account_position > 0:
+                if self.initial_avg_cost is None and account_avg_cost is not None:
+                    self.initial_avg_cost = float(account_avg_cost)
+                self.cash_anchor_price = None
+                self.cash_anchor_timestamp = None
+            else:
+                self.initial_avg_cost = None
+
     def _is_regular_hours(self, timestamp):
         dt = datetime.fromisoformat(timestamp)
         if dt.tzinfo is None:
