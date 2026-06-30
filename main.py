@@ -627,6 +627,7 @@ def run_strategy_on_log_prices(
                 if el >= 1:
                     denom = np.sqrt(var_since_ref)
                     Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
+                    Zsig[t] = Zd
                     bargain_entry = not np.isnan(Zd) and Zd < -k and M >= 0
                     trend_entry = (
                         trend_entry_z is not None
@@ -1326,6 +1327,7 @@ def run_online_adaptive_strategy(
     holding     = np.zeros(N, dtype=bool)
     k_path      = np.full(N, float(k_init))
     delta_path  = np.full(N, int(delta_init), dtype=int)
+    z_trend_path = np.full(N, np.nan if trend_entry_z is None else float(trend_entry_z))
     buy_times   = []
     sell_times  = []
     trade_log   = []
@@ -1474,6 +1476,7 @@ def run_online_adaptive_strategy(
 
         k_path[t] = current_k
         delta_path[t] = current_delta
+        z_trend_path[t] = np.nan if current_z is None else float(current_z)
         M = lp[t] - lp[t - current_delta] if t >= current_delta else np.nan
         el = t - buy_t if buy_t is not None else 0
         ref_t = buy_t
@@ -1538,6 +1541,7 @@ def run_online_adaptive_strategy(
                 if el >= 1:
                     denom = np.sqrt(var_since_ref)
                     Zd = (lp[t] - buy_lp - drift_since_ref) / denom if denom > 0 else np.nan
+                    Zsig[t] = Zd
                     bargain_entry = not np.isnan(Zd) and Zd < -current_k and M >= 0
                     trend_entry = (
                         trend_entry_z is not None
@@ -1576,7 +1580,7 @@ def run_online_adaptive_strategy(
         trade_log=trade_log,
         mu_step=mu_step, mu_hat=mu_hat,
         var_step=var_step, sigma_hat=sigma_hat,
-        k_path=k_path, delta_path=delta_path,
+        k_path=k_path, delta_path=delta_path, z_trend_path=z_trend_path,
         N=n_steps, k=current_k, h=h, c_buy=c_buy, c_sell=c_sell,
         mode="Real data online adaptive",
         source=source,
@@ -1697,6 +1701,7 @@ class TradingCanvas(FigureCanvas):
         self.ln_z,  = ax_z.plot([], [], color=TEAL,  lw=1.1, zorder=2)
         self.ln_kp, = ax_z.plot([], [], color=RED,   lw=0.8, ls="--", alpha=0.7)
         self.ln_kn, = ax_z.plot([], [], color=GREEN, lw=0.8, ls="--", alpha=0.7)
+        self.ln_zt, = ax_z.plot([], [], color=AMBER, lw=0.8, ls="--", alpha=0.8)
         self.vl_z   = ax_z.axvline(0, color="white", lw=0.8, alpha=0.4, ls="--")
 
         self.ln_rw, = ax_w.plot([], [], color=AMBER,  lw=2.0,
@@ -1723,6 +1728,13 @@ class TradingCanvas(FigureCanvas):
         k_path = data.get("k_path")
         if k_path is None:
             k_path = np.full_like(prices, data["k"], dtype=float)
+        z_trend_path = data.get("z_trend_path")
+        if z_trend_path is None:
+            z_trend = data.get("trend_entry_z")
+            if z_trend is None:
+                z_trend_path = np.full_like(prices, np.nan, dtype=float)
+            else:
+                z_trend_path = np.full_like(prices, float(z_trend), dtype=float)
 
         # ── price panel ──
         self.ln_price.set_data(xs, prices[:end])
@@ -1751,11 +1763,22 @@ class TradingCanvas(FigureCanvas):
         self.ln_z.set_data(xs, zv)
         self.ln_kp.set_data(xs, k_path[:end])
         self.ln_kn.set_data(xs, -k_path[:end])
+        self.ln_zt.set_data(xs, z_trend_path[:end])
         self.vl_z.set_xdata([t, t])
         valid = zv[~np.isnan(zv)]
         k_now = k_path[:end]
-        zlo = min(valid.min() if len(valid) else -1, -np.nanmax(k_now)) - 0.3
-        zhi = max(valid.max() if len(valid) else  1,  np.nanmax(k_now)) + 0.3
+        z_trend_now = z_trend_path[:end]
+        finite_z_trend = z_trend_now[np.isfinite(z_trend_now)]
+        zlo = min(
+            valid.min() if len(valid) else -1,
+            -np.nanmax(k_now),
+            finite_z_trend.min() if len(finite_z_trend) else 0,
+        ) - 0.3
+        zhi = max(
+            valid.max() if len(valid) else 1,
+            np.nanmax(k_now),
+            finite_z_trend.max() if len(finite_z_trend) else 0,
+        ) + 0.3
         if autoscale:
             self.ax_z.set_xlim(0, max(end, 10))
             self.ax_z.set_ylim(zlo, zhi)

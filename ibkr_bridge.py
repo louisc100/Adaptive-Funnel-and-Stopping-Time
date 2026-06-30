@@ -1001,6 +1001,52 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         floor_fn = getattr(strategy, "_minimum_profitable_sell_price", None)
         if callable(floor_fn):
             sell_floor = floor_fn()
+    latest_bar = display_bars[-1]
+    latest_spread = None
+    if latest_bar.close_bid is not None and latest_bar.close_ask is not None:
+        latest_spread = latest_bar.close_ask - latest_bar.close_bid
+    buy_fills = [marker for marker in filled_markers if marker.get("action") == "BUY"]
+    sell_fills = [marker for marker in filled_markers if marker.get("action") == "SELL"]
+    stats = {
+        "bars": len(display_bars),
+        "cycleBars": len(getattr(strategy, "bars", [])),
+        "latestMid": _json_float(latest_bar.close_mid),
+        "latestBid": _json_float(latest_bar.close_bid),
+        "latestAsk": _json_float(latest_bar.close_ask),
+        "latestSpread": _json_float(latest_spread),
+        "latestSpreadBps": _json_float(latest_bar.avg_spread_bps),
+        "positionQty": _json_float(getattr(strategy, "initial_position", None)),
+        "anchorPrice": _json_float(getattr(strategy, "initial_avg_cost", None)),
+        "cashAnchorPrice": _json_float(getattr(strategy, "cash_anchor_price", None)),
+        "realizedW": None if signal is None else _json_float(signal.realized_w),
+        "mtmW": None if signal is None else _json_float(signal.mtm_w),
+        "trades": None if signal is None else int(signal.trades),
+        "filledBuys": len(buy_fills),
+        "filledSells": len(sell_fills),
+        "lastBuy": buy_fills[-1] if buy_fills else None,
+        "lastSell": sell_fills[-1] if sell_fills else None,
+        "sellFloor": _json_float(sell_floor),
+        "blockReason": None if signal is None else signal.block_reason,
+        "note": None if signal is None else signal.note,
+    }
+    params = {
+        "k": _json_float(getattr(strategy, "k", None)),
+        "delta": getattr(strategy, "delta", None),
+        "entryDelta": getattr(strategy, "entry_delta", None),
+        "lookbackL": getattr(strategy, "max_funnel_lookback", None),
+        "trailA": _json_float(getattr(strategy, "trailing_stop", None)),
+        "zTrend": _json_float(getattr(strategy, "trend_entry_z", None)),
+        "driftQ": _json_float(getattr(strategy, "drift_process_var", None)),
+        "cost": _json_float(getattr(strategy, "cost", None)),
+        "fixedBuyFee": _json_float(getattr(strategy, "fixed_buy_fee", None)),
+        "fixedSellFee": _json_float(getattr(strategy, "fixed_sell_fee", None)),
+        "minSellProfit": _json_float(getattr(strategy, "min_sell_profit", None)),
+        "minSellProfitPerShare": _json_float(getattr(strategy, "min_sell_profit_per_share", None)),
+        "orderQuantity": getattr(strategy, "order_quantity", None),
+        "regularHoursOnly": bool(getattr(strategy, "regular_hours_only", False)),
+        "maxSpreadBps": _json_float(getattr(strategy, "max_spread_bps", None)),
+        "maxQuoteAge": _json_float(getattr(strategy, "max_quote_age", None)),
+    }
     payload = {
         "symbol": getattr(strategy, "symbol", ""),
         "signal": None if signal is None else signal.signal,
@@ -1009,6 +1055,8 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         "zTrend": _json_float(latest_data.get("trend_entry_z")),
         "sellFloor": _json_float(sell_floor),
         "updatedAt": datetime.now().isoformat(timespec="seconds"),
+        "stats": stats,
+        "params": params,
         "points": points,
         "markers": filled_markers,
     }
@@ -1069,6 +1117,41 @@ def _save_live_strategy_html_plot(strategy, signal, path):
     box-shadow: 0 18px 55px rgba(0, 0, 0, 0.35);
     padding: 14px;
   }}
+  .info-grid {{
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+  }}
+  .info-card {{
+    background: rgba(17, 24, 39, 0.92);
+    border: 1px solid #263244;
+    border-radius: 18px;
+    padding: 14px;
+  }}
+  .info-card h2 {{
+    margin: 0 0 10px;
+    font-size: 16px;
+    color: #f8fafc;
+  }}
+  .kv {{
+    display: grid;
+    grid-template-columns: minmax(130px, 1fr) minmax(90px, auto);
+    gap: 7px 14px;
+    color: var(--muted);
+    font-size: 13px;
+  }}
+  .kv strong {{
+    color: var(--text);
+    font-weight: 650;
+    text-align: right;
+  }}
+  .note {{
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.45;
+  }}
   canvas {{
     width: 100%;
     height: 680px;
@@ -1118,6 +1201,7 @@ def _save_live_strategy_html_plot(strategy, signal, path):
   @media (max-width: 800px) {{
     canvas {{ height: 520px; }}
     .controls {{ grid-template-columns: 1fr 1fr; }}
+    .info-grid {{ grid-template-columns: 1fr; }}
   }}
 </style>
 </head>
@@ -1149,6 +1233,17 @@ def _save_live_strategy_html_plot(strategy, signal, path):
       <span style="color:#22c55e">● Latest price</span>
       <span style="color:#22c55e">▲ Filled buy</span>
       <span style="color:#ef4444">▼ Filled sell</span>
+    </div>
+  </section>
+  <section class="info-grid">
+    <div class="info-card">
+      <h2>Live Stats</h2>
+      <div class="kv" id="statsGrid"></div>
+      <div class="note" id="statsNote"></div>
+    </div>
+    <div class="info-card">
+      <h2>Parameters</h2>
+      <div class="kv" id="paramsGrid"></div>
     </div>
   </section>
 </main>
@@ -1185,6 +1280,63 @@ document.getElementById("title").textContent =
   `${{payload.symbol}} live strategy | ${{payload.signal || "n/a"}} | ${{payload.position || "n/a"}}`;
 document.getElementById("meta").textContent =
   `Updated ${{payload.updatedAt}} | Bars ${{points.length}} | k=${{fmt(payload.k)}} | z_trend=${{fmt(payload.zTrend)}} | sell floor=${{fmt(payload.sellFloor)}}`;
+
+function renderGrid(id, rows) {{
+  const el = document.getElementById(id);
+  el.innerHTML = rows.map(([label, value]) =>
+    `<span>${{label}}</span><strong>${{value}}</strong>`
+  ).join("");
+}}
+
+function money(value) {{
+  return value === null || value === undefined ? "n/a" : `$${{Number(value).toFixed(2)}}`;
+}}
+
+function pct(value) {{
+  return value === null || value === undefined ? "n/a" : `${{Number(value).toFixed(2)}}%`;
+}}
+
+function markerText(marker) {{
+  if (!marker) return "n/a";
+  return `${{marker.action}} @ ${{fmt(marker.price)}}`;
+}}
+
+const stats = payload.stats || {{}};
+const params = payload.params || {{}};
+renderGrid("statsGrid", [
+  ["Signal", payload.signal || "n/a"],
+  ["Position", `${{payload.position || "n/a"}} (${{fmt(stats.positionQty)}} sh)`],
+  ["Bars / cycle bars", `${{fmt(stats.bars)}} / ${{fmt(stats.cycleBars)}}`],
+  ["Mid / bid / ask", `${{money(stats.latestMid)}} / ${{money(stats.latestBid)}} / ${{money(stats.latestAsk)}}`],
+  ["Spread", `${{money(stats.latestSpread)}} (${{fmt(stats.latestSpreadBps)}} bps)`],
+  ["Anchor price", money(stats.anchorPrice)],
+  ["Cash anchor", money(stats.cashAnchorPrice)],
+  ["Profit floor", money(stats.sellFloor)],
+  ["Realized W", money(stats.realizedW)],
+  ["Mark-to-market W", money(stats.mtmW)],
+  ["Completed trades", fmt(stats.trades)],
+  ["Filled buys / sells", `${{fmt(stats.filledBuys)}} / ${{fmt(stats.filledSells)}}`],
+  ["Last buy", markerText(stats.lastBuy)],
+  ["Last sell", markerText(stats.lastSell)],
+]);
+document.getElementById("statsNote").textContent =
+  stats.note ? `Note: ${{stats.note}}` : (stats.blockReason ? `Blocked: ${{stats.blockReason}}` : "");
+renderGrid("paramsGrid", [
+  ["k", fmt(params.k)],
+  ["delta / entry_delta", `${{fmt(params.delta)}} / ${{fmt(params.entryDelta)}}`],
+  ["L", fmt(params.lookbackL)],
+  ["trailing a", fmt(params.trailA)],
+  ["z_trend", fmt(params.zTrend)],
+  ["drift q", fmt(params.driftQ)],
+  ["proportional cost", fmt(params.cost)],
+  ["fixed buy / sell fee", `${{money(params.fixedBuyFee)}} / ${{money(params.fixedSellFee)}}`],
+  ["min sell profit", money(params.minSellProfit)],
+  ["min profit/share", money(params.minSellProfitPerShare)],
+  ["order quantity", fmt(params.orderQuantity)],
+  ["regular hours only", params.regularHoursOnly ? "yes" : "no"],
+  ["max spread", `${{fmt(params.maxSpreadBps)}} bps`],
+  ["max quote age", `${{fmt(params.maxQuoteAge)}} sec`],
+]);
 
 function fmt(value) {{
   return value === null || value === undefined ? "n/a" : Number(value).toFixed(4).replace(/0+$/, "").replace(/\\.$/, "");
