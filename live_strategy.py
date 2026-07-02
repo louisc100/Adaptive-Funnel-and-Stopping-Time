@@ -137,8 +137,10 @@ class LiveDryRunStrategy:
         fixed_sell_fee=0.0,
         min_sell_profit=0.0,
         min_sell_profit_per_share=0.0,
+        profit_target_mode="per_share",
         order_quantity=1,
         initial_buy_if_cash=False,
+        capital_budget=1000.0,
     ):
         self.symbol = symbol.upper()
         self.k = float(k)
@@ -161,8 +163,13 @@ class LiveDryRunStrategy:
         self.fixed_sell_fee = max(float(fixed_sell_fee), 0.0)
         self.min_sell_profit = max(float(min_sell_profit), 0.0)
         self.min_sell_profit_per_share = max(float(min_sell_profit_per_share), 0.0)
+        self.profit_target_mode = str(profit_target_mode)
+        if self.profit_target_mode not in ("fixed", "per_share", "max"):
+            self.profit_target_mode = "per_share"
         self.order_quantity = max(int(order_quantity), 1)
         self.initial_buy_if_cash = bool(initial_buy_if_cash)
+        self.capital_budget = max(float(capital_budget), 0.0)
+        self.live_cash = self._initial_live_cash()
         self._initial_buy_emitted = False
         self.bars = []
         self.display_bars = []
@@ -176,6 +183,23 @@ class LiveDryRunStrategy:
         self.cash_anchor_price = None
         self.cash_anchor_timestamp = None
         self.last_live_exit_reason = ""
+
+    def _initial_live_cash(self):
+        """Model cash remaining after the current known account position."""
+        if (
+            self.initial_position is not None
+            and self.initial_position > 0
+            and self.initial_avg_cost is not None
+            and self.initial_avg_cost > 0
+        ):
+            buy_cost = (
+                self.initial_position
+                * self.initial_avg_cost
+                * (1.0 + max(self.cost, 0.0))
+                + self.fixed_buy_fee
+            )
+            return self.capital_budget - buy_cost
+        return self.capital_budget
 
     def on_bar(self, bar, quote_age_seconds=None):
         blocked, block_reason = self._check_guards(bar, quote_age_seconds)
@@ -395,10 +419,7 @@ class LiveDryRunStrategy:
         prop_cost = max(float(self.cost), 0.0)
         if prop_cost >= 1.0:
             return None
-        target_profit = max(
-            self.min_sell_profit,
-            self.min_sell_profit_per_share * quantity,
-        )
+        target_profit = self._target_profit(quantity)
         required_proceeds = (
             entry_price * quantity * (1.0 + prop_cost)
             + self.fixed_buy_fee
@@ -482,14 +503,21 @@ class LiveDryRunStrategy:
 
     def _effective_proportional_cost(self, reference_price):
         notional = max(float(reference_price) * self.order_quantity, 1e-12)
-        target_profit = max(
-            self.min_sell_profit,
-            self.min_sell_profit_per_share * self.order_quantity,
-        )
+        target_profit = self._target_profit(self.order_quantity)
         return {
             "buy": self.cost + self.fixed_buy_fee / notional,
             "sell": self.cost + (self.fixed_sell_fee + target_profit) / notional,
         }
+
+    def _target_profit(self, quantity=None):
+        quantity = max(int(self.order_quantity if quantity is None else quantity), 1)
+        fixed_profit = self.min_sell_profit
+        per_share_profit = self.min_sell_profit_per_share * quantity
+        if self.profit_target_mode == "fixed":
+            return fixed_profit
+        if self.profit_target_mode == "per_share":
+            return per_share_profit
+        return max(fixed_profit, per_share_profit)
 
     def apply_filled_order(self, action, quantity, price):
         """Synchronize live strategy state after the bridge receives a fill."""
@@ -501,6 +529,11 @@ class LiveDryRunStrategy:
         if action == "BUY":
             new_position = current_position + quantity
             self.initial_position = new_position
+            if price is not None and price > 0:
+                self.live_cash -= (
+                    quantity * price * (1.0 + max(self.cost, 0.0))
+                    + self.fixed_buy_fee
+                )
             if price is not None and price > 0:
                 self.initial_avg_cost = price
             self.cash_anchor_price = None
@@ -531,6 +564,11 @@ class LiveDryRunStrategy:
             })
             new_position = max(current_position - quantity, 0.0)
             self.initial_position = new_position
+            if price is not None and price > 0:
+                self.live_cash += (
+                    quantity * price * (1.0 - max(self.cost, 0.0))
+                    - self.fixed_sell_fee
+                )
             if new_position <= 0:
                 self.initial_avg_cost = None
                 # A filled sell creates tau_s for cash re-entry logic.
@@ -548,6 +586,37 @@ class LiveDryRunStrategy:
                 self.bars = []
                 self.cycle_start_display_index = len(self.display_bars)
                 self.latest_data = None
+
+    def live_account_snapshot(self, bar=None):
+        """Actual-dollar view using integer shares, fills, cash, and exit costs."""
+        quantity = 0.0 if self.initial_position is None else float(self.initial_position)
+        bid = None if bar is None else self._clean_float(bar.close_bid)
+        mid = None if bar is None else self._clean_float(bar.close_mid)
+        mark_price = bid if bid is not None else mid
+        position_value = None
+        liquidation_value = self.live_cash
+        estimated_exit_fee = 0.0
+        if quantity > 0 and mark_price is not None:
+            position_value = quantity * mark_price
+            estimated_exit_fee = self.fixed_sell_fee
+            liquidation_value = (
+                self.live_cash
+                + quantity * mark_price * (1.0 - max(self.cost, 0.0))
+                - estimated_exit_fee
+            )
+        pnl = liquidation_value - self.capital_budget
+        ret = pnl / self.capital_budget if self.capital_budget > 0 else np.nan
+        return {
+            "capital_budget": self._clean_float(self.capital_budget),
+            "cash": self._clean_float(self.live_cash),
+            "shares": self._clean_float(quantity),
+            "mark_price": self._clean_float(mark_price),
+            "position_value": self._clean_float(position_value),
+            "estimated_exit_fee": self._clean_float(estimated_exit_fee),
+            "liquidation_value": self._clean_float(liquidation_value),
+            "pnl": self._clean_float(pnl),
+            "return": self._clean_float(ret),
+        }
 
     def _bars_for_strategy(self):
         """Add a synthetic entry anchor when TWS reports an existing position."""
@@ -769,8 +838,12 @@ class LiveDryRunStrategy:
                 "fixed_sell_fee": self.fixed_sell_fee,
                 "min_sell_profit": self.min_sell_profit,
                 "min_sell_profit_per_share": self.min_sell_profit_per_share,
+                "profit_target_mode": self.profit_target_mode,
                 "order_quantity": self.order_quantity,
+                "capital_budget": self.capital_budget,
             },
+            "capital_budget": self._clean_float(self.capital_budget),
+            "live_cash": self._clean_float(self.live_cash),
             "initial_position": self._clean_float(self.initial_position),
             "initial_avg_cost": self._clean_float(self.initial_avg_cost),
             "initial_buy_emitted": bool(self._initial_buy_emitted),
@@ -796,6 +869,33 @@ class LiveDryRunStrategy:
             raise ValueError(
                 f"State symbol {saved_symbol} does not match requested symbol {self.symbol}."
             )
+        params = state.get("params", {})
+        if params:
+            self.k = float(params.get("k", self.k))
+            self.delta = int(params.get("delta", self.delta))
+            self.entry_delta = int(params.get("entry_delta", self.entry_delta))
+            self.cost = float(params.get("cost", self.cost))
+            self.drift_process_var = float(
+                params.get("drift_process_var", self.drift_process_var)
+            )
+            self.max_funnel_lookback = int(
+                params.get("max_funnel_lookback", self.max_funnel_lookback)
+            )
+            self.trailing_stop = params.get("trailing_stop", self.trailing_stop)
+            self.trend_entry_z = params.get("trend_entry_z", self.trend_entry_z)
+            self.fixed_buy_fee = float(params.get("fixed_buy_fee", self.fixed_buy_fee))
+            self.fixed_sell_fee = float(params.get("fixed_sell_fee", self.fixed_sell_fee))
+            self.min_sell_profit = float(params.get("min_sell_profit", self.min_sell_profit))
+            self.min_sell_profit_per_share = float(
+                params.get("min_sell_profit_per_share", self.min_sell_profit_per_share)
+            )
+            self.profit_target_mode = str(
+                params.get("profit_target_mode", self.profit_target_mode)
+            )
+            if self.profit_target_mode not in ("fixed", "per_share", "max"):
+                self.profit_target_mode = "per_share"
+            self.order_quantity = int(params.get("order_quantity", self.order_quantity))
+            self.capital_budget = float(params.get("capital_budget", self.capital_budget))
 
         self.initial_position = state.get("initial_position")
         self.initial_position = (
@@ -805,6 +905,8 @@ class LiveDryRunStrategy:
         self.initial_avg_cost = (
             None if self.initial_avg_cost is None else float(self.initial_avg_cost)
         )
+        self.capital_budget = float(state.get("capital_budget", self.capital_budget))
+        self.live_cash = float(state.get("live_cash", self._initial_live_cash()))
         self._initial_buy_emitted = bool(state.get("initial_buy_emitted", False))
         self.bars = [self._bar_from_dict(item) for item in state.get("bars", [])]
         self.display_bars = [

@@ -184,6 +184,7 @@ def _minimum_profitable_sell_limit(
     quantity,
     min_profit=0.01,
     min_profit_per_share=0.0,
+    profit_target_mode="per_share",
 ):
     """Minimum sell limit that guarantees positive net profit if filled."""
     if strategy is None:
@@ -201,12 +202,17 @@ def _minimum_profitable_sell_limit(
     fixed_sell_fee = max(float(getattr(strategy, "fixed_sell_fee", 0.0)), 0.0)
     min_profit = max(float(min_profit), 0.0)
     min_profit_per_share = max(float(min_profit_per_share), 0.0)
-    min_profit = max(min_profit, min_profit_per_share * quantity)
+    if profit_target_mode == "fixed":
+        target_profit = min_profit
+    elif profit_target_mode == "per_share":
+        target_profit = min_profit_per_share * quantity
+    else:
+        target_profit = max(min_profit, min_profit_per_share * quantity)
     required_proceeds = (
         entry_price * quantity * (1.0 + prop_cost)
         + fixed_buy_fee
         + fixed_sell_fee
-        + min_profit
+        + target_profit
     )
     raw_limit = required_proceeds / (quantity * (1.0 - prop_cost))
     # IBKR equity limit prices are cent-based. Round upward so the floor survives
@@ -220,12 +226,14 @@ def _apply_profitable_sell_floor(
     quantity,
     min_profit=0.01,
     min_profit_per_share=0.0,
+    profit_target_mode="per_share",
 ):
     floor = _minimum_profitable_sell_limit(
         strategy,
         quantity,
         min_profit=min_profit,
         min_profit_per_share=min_profit_per_share,
+        profit_target_mode=profit_target_mode,
     )
     if floor is None:
         return limit_price, None
@@ -243,6 +251,7 @@ def _submit_limit_order(
     strategy=None,
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
+    profit_target_mode="per_share",
 ):
     """Submit a limit order for a WOULD BUY / WOULD SELL signal."""
     if signal.signal not in ("WOULD BUY", "WOULD SELL"):
@@ -266,6 +275,7 @@ def _submit_limit_order(
             quantity,
             min_profit=min_sell_profit,
             min_profit_per_share=min_sell_profit_per_share,
+            profit_target_mode=profit_target_mode,
         )
 
     from ib_insync import LimitOrder
@@ -343,6 +353,7 @@ def _handle_order_signal(
     strategy=None,
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
+    profit_target_mode="per_share",
     auto_orders=False,
 ):
     """Prompt or auto-submit when the strategy emits an actionable signal."""
@@ -367,6 +378,7 @@ def _handle_order_signal(
             quantity,
             min_profit=min_sell_profit,
             min_profit_per_share=min_sell_profit_per_share,
+            profit_target_mode=profit_target_mode,
         )
 
     print("")
@@ -399,6 +411,7 @@ def _handle_order_signal(
             strategy=strategy,
             min_sell_profit=min_sell_profit,
             min_sell_profit_per_share=min_sell_profit_per_share,
+            profit_target_mode=profit_target_mode,
         )
 
     answer = input("Submit this limit order to TWS Paper? Type y to submit: ").strip().lower()
@@ -412,6 +425,7 @@ def _handle_order_signal(
             strategy=strategy,
             min_sell_profit=min_sell_profit,
             min_sell_profit_per_share=min_sell_profit_per_share,
+            profit_target_mode=profit_target_mode,
         )
     print("Order skipped by user.")
     return None
@@ -504,6 +518,7 @@ def _handle_interactive_order_command(
     limit_buffer_bps,
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
+    profit_target_mode="per_share",
 ):
     """Handle terminal commands: buy [qty] [limit], sell [qty] [limit]."""
     if not command:
@@ -555,6 +570,7 @@ def _handle_interactive_order_command(
             quantity,
             min_profit=min_sell_profit,
             min_profit_per_share=min_sell_profit_per_share,
+            profit_target_mode=profit_target_mode,
         )
 
     print("")
@@ -1007,6 +1023,10 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         latest_spread = latest_bar.close_ask - latest_bar.close_bid
     buy_fills = [marker for marker in filled_markers if marker.get("action") == "BUY"]
     sell_fills = [marker for marker in filled_markers if marker.get("action") == "SELL"]
+    live_account = {}
+    live_account_fn = getattr(strategy, "live_account_snapshot", None)
+    if callable(live_account_fn):
+        live_account = live_account_fn(latest_bar)
     stats = {
         "bars": len(display_bars),
         "cycleBars": len(getattr(strategy, "bars", [])),
@@ -1026,6 +1046,7 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         "lastBuy": buy_fills[-1] if buy_fills else None,
         "lastSell": sell_fills[-1] if sell_fills else None,
         "sellFloor": _json_float(sell_floor),
+        "liveAccount": live_account,
         "blockReason": None if signal is None else signal.block_reason,
         "note": None if signal is None else signal.note,
     }
@@ -1042,7 +1063,9 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         "fixedSellFee": _json_float(getattr(strategy, "fixed_sell_fee", None)),
         "minSellProfit": _json_float(getattr(strategy, "min_sell_profit", None)),
         "minSellProfitPerShare": _json_float(getattr(strategy, "min_sell_profit_per_share", None)),
+        "profitTargetMode": getattr(strategy, "profit_target_mode", None),
         "orderQuantity": getattr(strategy, "order_quantity", None),
+        "capitalBudget": _json_float(getattr(strategy, "capital_budget", None)),
         "regularHoursOnly": bool(getattr(strategy, "regular_hours_only", False)),
         "maxSpreadBps": _json_float(getattr(strategy, "max_spread_bps", None)),
         "maxQuoteAge": _json_float(getattr(strategy, "max_quote_age", None)),
@@ -1303,17 +1326,25 @@ function markerText(marker) {{
 
 const stats = payload.stats || {{}};
 const params = payload.params || {{}};
+const liveAccount = stats.liveAccount || {{}};
 renderGrid("statsGrid", [
   ["Signal", payload.signal || "n/a"],
   ["Position", `${{payload.position || "n/a"}} (${{fmt(stats.positionQty)}} sh)`],
   ["Bars / cycle bars", `${{fmt(stats.bars)}} / ${{fmt(stats.cycleBars)}}`],
   ["Mid / bid / ask", `${{money(stats.latestMid)}} / ${{money(stats.latestBid)}} / ${{money(stats.latestAsk)}}`],
   ["Spread", `${{money(stats.latestSpread)}} (${{fmt(stats.latestSpreadBps)}} bps)`],
+  ["Capital budget", money(liveAccount.capital_budget)],
+  ["Live cash", money(liveAccount.cash)],
+  ["Live shares", fmt(liveAccount.shares)],
+  ["Live stock value", money(liveAccount.position_value)],
+  ["Live liquidation W", money(liveAccount.liquidation_value)],
+  ["Live net P&L", money(liveAccount.pnl)],
+  ["Live return", pct((liveAccount.return ?? null) === null ? null : liveAccount.return * 100)],
   ["Anchor price", money(stats.anchorPrice)],
   ["Cash anchor", money(stats.cashAnchorPrice)],
   ["Profit floor", money(stats.sellFloor)],
-  ["Realized W", money(stats.realizedW)],
-  ["Mark-to-market W", money(stats.mtmW)],
+  ["Research realized W", money(stats.realizedW)],
+  ["Research MtM W", money(stats.mtmW)],
   ["Completed trades", fmt(stats.trades)],
   ["Filled buys / sells", `${{fmt(stats.filledBuys)}} / ${{fmt(stats.filledSells)}}`],
   ["Last buy", markerText(stats.lastBuy)],
@@ -1332,7 +1363,9 @@ renderGrid("paramsGrid", [
   ["fixed buy / sell fee", `${{money(params.fixedBuyFee)}} / ${{money(params.fixedSellFee)}}`],
   ["min sell profit", money(params.minSellProfit)],
   ["min profit/share", money(params.minSellProfitPerShare)],
+  ["profit target mode", params.profitTargetMode || "n/a"],
   ["order quantity", fmt(params.orderQuantity)],
+  ["capital budget", money(params.capitalBudget)],
   ["regular hours only", params.regularHoursOnly ? "yes" : "no"],
   ["max spread", `${{fmt(params.maxSpreadBps)}} bps`],
   ["max quote age", `${{fmt(params.maxQuoteAge)}} sec`],
@@ -1716,6 +1749,7 @@ def watch_stock_quote(
     limit_buffer_bps=5.0,
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
+    profit_target_mode="per_share",
     stop_after_order=True,
 ):
     """Continuously print Level 1 quotes from TWS and optionally act on signals."""
@@ -1897,6 +1931,7 @@ def watch_stock_quote(
                         limit_buffer_bps,
                         min_sell_profit=min_sell_profit,
                         min_sell_profit_per_share=min_sell_profit_per_share,
+                        profit_target_mode=profit_target_mode,
                     )
                     if trade is not None:
                         pending_trades.append({
@@ -1941,6 +1976,7 @@ def watch_stock_quote(
                             strategy=strategy,
                             min_sell_profit=min_sell_profit,
                             min_sell_profit_per_share=min_sell_profit_per_share,
+                            profit_target_mode=profit_target_mode,
                             auto_orders=auto_orders,
                         )
                         if trade is not None:
@@ -2192,6 +2228,12 @@ def parse_args(argv):
     )
     parser.add_argument("--order-quantity", type=int, default=4, help="Order quantity.")
     parser.add_argument(
+        "--capital-budget",
+        type=float,
+        default=1000.0,
+        help="Dollar budget used for live discrete-share wealth accounting.",
+    )
+    parser.add_argument(
         "--limit-buffer-bps",
         type=float,
         default=5.0,
@@ -2224,6 +2266,16 @@ def parse_args(argv):
         type=float,
         default=1.0,
         help="Minimum net profit per share required before a live sell limit can fill.",
+    )
+    parser.add_argument(
+        "--profit-target-mode",
+        choices=("fixed", "per_share", "max"),
+        default="per_share",
+        help=(
+            "How to interpret sell profit target: fixed uses --min-sell-profit "
+            "as total dollars; per_share uses --min-sell-profit-per-share times "
+            "quantity; max requires the larger of both."
+        ),
     )
     parser.add_argument("--lookback-L", type=int, default=20, help="Bounded funnel lookback.")
     parser.add_argument("--trail-a", type=float, default=0.01, help="Trailing-profit log drawdown threshold.")
@@ -2374,8 +2426,10 @@ def main(argv=None):
                     "fixed_sell_fee": args.fixed_sell_fee,
                     "min_sell_profit": args.min_sell_profit,
                     "min_sell_profit_per_share": args.min_sell_profit_per_share,
+                    "profit_target_mode": args.profit_target_mode,
                     "order_quantity": args.order_quantity,
                     "initial_buy_if_cash": args.initial_buy_if_cash,
+                    "capital_budget": args.capital_budget,
                 },
                 signal_log_path=args.signal_log,
                 live_plot_path=args.live_plot,
@@ -2390,6 +2444,7 @@ def main(argv=None):
                 limit_buffer_bps=args.limit_buffer_bps,
                 min_sell_profit=args.min_sell_profit,
                 min_sell_profit_per_share=args.min_sell_profit_per_share,
+                profit_target_mode=args.profit_target_mode,
                 stop_after_order=not args.keep_running_after_order,
             )
         except KeyboardInterrupt:
