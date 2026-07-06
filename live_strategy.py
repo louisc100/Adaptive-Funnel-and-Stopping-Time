@@ -209,6 +209,7 @@ class LiveDryRunStrategy:
         self.display_funnel_low.append(np.nan)
         self.display_z.append(np.nan)
         self.bars.append(bar)
+        self._ensure_open_position_marker()
         if len(self.bars) < 2:
             return StrategySignal(
                 timestamp=bar.timestamp,
@@ -587,6 +588,38 @@ class LiveDryRunStrategy:
                 self.cycle_start_display_index = len(self.display_bars)
                 self.latest_data = None
 
+    def _ensure_open_position_marker(self):
+        """Recover a buy anchor marker when TWS says we already hold shares."""
+        if (
+            self.initial_position is None
+            or self.initial_position <= 0
+            or self.initial_avg_cost is None
+            or self.initial_avg_cost <= 0
+            or not self.display_bars
+        ):
+            return
+        last_action = None
+        if self.filled_markers:
+            last_action = self.filled_markers[-1].get("action")
+        if last_action == "BUY":
+            return
+
+        marker_index = max(len(self.display_bars) - 1, 0)
+        price = float(self.initial_avg_cost)
+        if 0 <= marker_index < len(self.display_funnel_mid):
+            self.display_funnel_mid[marker_index] = price
+            self.display_funnel_up[marker_index] = price
+            self.display_funnel_low[marker_index] = price
+            if np.isnan(self.display_z[marker_index]):
+                self.display_z[marker_index] = 0.0
+        self.filled_markers.append({
+            "action": "BUY",
+            "index": marker_index,
+            "price": price,
+            "recovered": True,
+        })
+        self._initial_buy_emitted = True
+
     def live_account_snapshot(self, bar=None):
         """Actual-dollar view using integer shares, fills, cash, and exit costs."""
         quantity = 0.0 if self.initial_position is None else float(self.initial_position)
@@ -948,11 +981,15 @@ class LiveDryRunStrategy:
                 del series[n_display:]
 
         if account_position is not None:
+            prior_position = self.initial_position
             account_position = float(account_position)
             self.initial_position = account_position
             if account_position > 0:
                 if self.initial_avg_cost is None and account_avg_cost is not None:
                     self.initial_avg_cost = float(account_avg_cost)
+                if prior_position is None or prior_position <= 0:
+                    self.live_cash = self._initial_live_cash()
+                    self._initial_buy_emitted = True
                 self.cash_anchor_price = None
                 self.cash_anchor_timestamp = None
             else:
