@@ -141,6 +141,7 @@ class LiveDryRunStrategy:
         order_quantity=1,
         initial_buy_if_cash=False,
         capital_budget=1000.0,
+        cash_reentry_cooldown_bars=10,
     ):
         self.symbol = symbol.upper()
         self.k = float(k)
@@ -169,6 +170,7 @@ class LiveDryRunStrategy:
         self.order_quantity = max(int(order_quantity), 1)
         self.initial_buy_if_cash = bool(initial_buy_if_cash)
         self.capital_budget = max(float(capital_budget), 0.0)
+        self.cash_reentry_cooldown_bars = max(int(cash_reentry_cooldown_bars), 0)
         self.live_cash = self._initial_live_cash()
         self._initial_buy_emitted = False
         self.bars = []
@@ -719,7 +721,10 @@ class LiveDryRunStrategy:
         denom = np.sqrt(var)
         z = (lp[t] - lp[ref_t] - drift) / denom if denom > 0 else np.nan
         momentum = lp[t] - lp[t - d] if t >= d else np.nan
+        cooldown_ok = t >= self.cash_reentry_cooldown_bars
         buy_now = (
+            cooldown_ok
+            and
             t >= d
             and not np.isnan(z)
             and not np.isnan(momentum)
@@ -874,6 +879,7 @@ class LiveDryRunStrategy:
                 "profit_target_mode": self.profit_target_mode,
                 "order_quantity": self.order_quantity,
                 "capital_budget": self.capital_budget,
+                "cash_reentry_cooldown_bars": self.cash_reentry_cooldown_bars,
             },
             "capital_budget": self._clean_float(self.capital_budget),
             "live_cash": self._clean_float(self.live_cash),
@@ -929,6 +935,12 @@ class LiveDryRunStrategy:
                 self.profit_target_mode = "per_share"
             self.order_quantity = int(params.get("order_quantity", self.order_quantity))
             self.capital_budget = float(params.get("capital_budget", self.capital_budget))
+            self.cash_reentry_cooldown_bars = int(
+                params.get(
+                    "cash_reentry_cooldown_bars",
+                    self.cash_reentry_cooldown_bars,
+                )
+            )
 
         self.initial_position = state.get("initial_position")
         self.initial_position = (

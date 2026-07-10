@@ -202,7 +202,11 @@ The simulation interface treats \(a\) as a tunable design parameter. In the live
 
 \subsection{Re-Entry}
 
-After a sale at \(\tau_s\), the strategy holds cash and uses \(\tau_s\) as the new reference point. The live implementation preserves the filled sell price as this cash anchor, so re-entry is measured from the actual broker-confirmed exit rather than from a fresh unanchored path. The original symmetric re-entry rule buys after a lower-funnel recovery:
+After a sale at \(\tau_s\), the strategy holds cash and uses \(\tau_s\) as the new reference point. The live implementation preserves the filled sell price as this cash anchor, so re-entry is measured from the actual broker-confirmed exit rather than from a fresh unanchored path. Because \(V_{\tau_s}(t)\) is based on very few variance terms immediately after a sale, early values of \(Z_{\tau_s,t}\) can be artificially large. The live rule therefore imposes a short cash cooldown \(c_{\mathrm{cash}}\) before any re-entry is allowed. The default is
+\[
+c_{\mathrm{cash}}=10
+\]
+completed bars. The original symmetric re-entry rule buys after a lower-funnel recovery:
 \[
 Z_{\tau_s,t}<-k,
 \qquad
@@ -213,13 +217,13 @@ This is a bargain-entry rule. It works naturally in mean-reverting markets but c
 \tau_b^{\mathrm{next}}
 =
 \inf\left\{
-t>\tau_s+\delta:
+t:\ t-\tau_s\geq \max(\delta,c_{\mathrm{cash}}),
 \left(Z_{\tau_s,t}<-k,\ M_t\geq 0\right)
 \quad\text{or}\quad
 \left(Z_{\tau_s,t}>z_{\mathrm{trend}},\ M_t>0\right).
 \right\}.
 \]
-The default value is \(z_{\mathrm{trend}}=0.35\), intentionally smaller than \(k\). The first condition seeks a recovered discount; the second permits participation in an ongoing upward trend. At the current Layer 2 stage, \(z_{\mathrm{trend}}\) is treated as a fixed design constant; in later calibration work it should either be selected by walk-forward validation or made time-varying with the entry/exit thresholds.
+The default value is \(z_{\mathrm{trend}}=0.35\), intentionally smaller than \(k\). In live commands this threshold can be raised, for example to \(z_{\mathrm{trend}}=0.75\), to make trend re-entry stricter. The first condition seeks a recovered discount; the second permits participation in an ongoing upward trend. The cooldown is not a profit condition; it is a statistical stabilization guard that prevents immediate sell-buy whipsaw caused by a tiny post-sale denominator in \(Z_{\tau_s,t}\). At the current Layer 2 stage, \(z_{\mathrm{trend}}\) and \(c_{\mathrm{cash}}\) are treated as fixed design constants; in later calibration work they should either be selected by walk-forward validation or made time-varying with the entry/exit thresholds.
 
 For live paper trading, the momentum window is separated into an exit window \(\delta_{\mathrm{exit}}\) and an entry window \(\delta_{\mathrm{entry}}\). The default live values are \(\delta_{\mathrm{exit}}=3\) and \(\delta_{\mathrm{entry}}=2\). This keeps sell decisions from reacting to a single noisy bar while allowing lower-funnel recoveries after a filled sell to be detected sooner.
 

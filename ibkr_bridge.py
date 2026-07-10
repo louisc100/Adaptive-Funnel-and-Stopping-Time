@@ -1069,6 +1069,9 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         "regularHoursOnly": bool(getattr(strategy, "regular_hours_only", False)),
         "maxSpreadBps": _json_float(getattr(strategy, "max_spread_bps", None)),
         "maxQuoteAge": _json_float(getattr(strategy, "max_quote_age", None)),
+        "cashReentryCooldownBars": getattr(
+            strategy, "cash_reentry_cooldown_bars", None
+        ),
     }
     payload = {
         "symbol": getattr(strategy, "symbol", ""),
@@ -1369,6 +1372,7 @@ renderGrid("paramsGrid", [
   ["regular hours only", params.regularHoursOnly ? "yes" : "no"],
   ["max spread", `${{fmt(params.maxSpreadBps)}} bps`],
   ["max quote age", `${{fmt(params.maxQuoteAge)}} sec`],
+  ["cash cooldown bars", fmt(params.cashReentryCooldownBars)],
 ]);
 
 function fmt(value) {{
@@ -2242,6 +2246,12 @@ def parse_args(argv):
     parser.add_argument("--k", type=float, default=0.8, help="Strategy funnel threshold.")
     parser.add_argument("--delta", type=int, default=3, help="Strategy momentum window in bars.")
     parser.add_argument("--entry-delta", type=int, default=2, help="Cash re-entry momentum window in bars.")
+    parser.add_argument(
+        "--cash-reentry-cooldown-bars",
+        type=int,
+        default=10,
+        help="Minimum completed bars after a filled sell before cash re-entry can buy again.",
+    )
     parser.add_argument("--cost", type=float, default=0.0, help="Per-side proportional transaction cost.")
     parser.add_argument(
         "--fixed-buy-fee",
@@ -2430,6 +2440,7 @@ def main(argv=None):
                     "order_quantity": args.order_quantity,
                     "initial_buy_if_cash": args.initial_buy_if_cash,
                     "capital_budget": args.capital_budget,
+                    "cash_reentry_cooldown_bars": args.cash_reentry_cooldown_bars,
                 },
                 signal_log_path=args.signal_log,
                 live_plot_path=args.live_plot,
