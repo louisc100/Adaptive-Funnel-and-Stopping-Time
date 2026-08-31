@@ -179,6 +179,39 @@ def _limit_price_for_signal(signal, limit_buffer_bps):
     return None
 
 
+def _quantity_for_signal(
+    signal,
+    strategy,
+    fallback_quantity,
+    sizing_mode="fixed",
+    cash_reserve=0.0,
+    limit_price=None,
+):
+    """Choose order size for a strategy signal."""
+    action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
+    fallback_quantity = max(int(fallback_quantity), 1)
+    if sizing_mode != "cash_reserve" or strategy is None:
+        return fallback_quantity
+    if action == "SELL":
+        quantity_fn = getattr(strategy, "active_sell_quantity", None)
+        if callable(quantity_fn):
+            return int(quantity_fn())
+        position = _safe_float(getattr(strategy, "initial_position", None))
+        return max(int(math.floor(position or 0.0)), 0)
+    reference_price = _safe_float(limit_price or signal.close_ask)
+    quantity_fn = getattr(strategy, "active_buy_quantity", None)
+    if callable(quantity_fn):
+        return int(quantity_fn(reference_price))
+    live_cash = _safe_float(getattr(strategy, "live_cash", None))
+    fixed_buy_fee = max(float(getattr(strategy, "fixed_buy_fee", 0.0)), 0.0)
+    prop_cost = max(float(getattr(strategy, "cost", 0.0)), 0.0)
+    if live_cash is None or reference_price is None or reference_price <= 0:
+        return 0
+    spendable_cash = live_cash - max(float(cash_reserve), 0.0) - fixed_buy_fee
+    unit_cost = reference_price * (1.0 + prop_cost)
+    return max(int(math.floor(spendable_cash / unit_cost)), 0)
+
+
 def _minimum_profitable_sell_limit(
     strategy,
     quantity,
@@ -354,6 +387,8 @@ def _handle_order_signal(
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
     profit_target_mode="per_share",
+    sizing_mode="fixed",
+    cash_reserve=0.0,
     auto_orders=False,
 ):
     """Prompt or auto-submit when the strategy emits an actionable signal."""
@@ -366,9 +401,22 @@ def _handle_order_signal(
     if limit_price is None:
         return None
     action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
-    quantity = int(quantity)
+    quantity = _quantity_for_signal(
+        signal,
+        strategy,
+        quantity,
+        sizing_mode=sizing_mode,
+        cash_reserve=cash_reserve,
+        limit_price=limit_price,
+    )
     if quantity <= 0:
-        print("Order skipped: quantity must be positive.")
+        if action == "BUY" and sizing_mode == "cash_reserve":
+            print(
+                "Order skipped: cash-reserve sizing leaves no spendable cash "
+                "for at least one share."
+            )
+        else:
+            print("Order skipped: quantity must be positive.")
         return None
     floor = None
     if action == "SELL":
@@ -519,6 +567,8 @@ def _handle_interactive_order_command(
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
     profit_target_mode="per_share",
+    sizing_mode="fixed",
+    cash_reserve=0.0,
 ):
     """Handle terminal commands: buy [qty] [limit], sell [qty] [limit]."""
     if not command:
@@ -545,7 +595,7 @@ def _handle_interactive_order_command(
         print(f"Unknown interactive command: {command!r}. Type 'help' for options.")
         return False, None
 
-    quantity = default_quantity
+    quantity = None
     if len(parts) >= 2:
         try:
             quantity = int(parts[1])
@@ -562,6 +612,25 @@ def _handle_interactive_order_command(
             return False, None
     else:
         limit_price = _limit_price_for_action(row, action.upper(), limit_buffer_bps)
+    if quantity is None:
+        if action == "buy":
+            synthetic_signal = type("InteractiveSignal", (), {
+                "signal": "WOULD BUY",
+                "close_ask": row.ask,
+            })()
+        else:
+            synthetic_signal = type("InteractiveSignal", (), {
+                "signal": "WOULD SELL",
+                "close_bid": row.bid,
+            })()
+        quantity = _quantity_for_signal(
+            synthetic_signal,
+            strategy,
+            default_quantity,
+            sizing_mode=sizing_mode,
+            cash_reserve=cash_reserve,
+            limit_price=limit_price,
+        )
     floor = None
     if action == "sell":
         limit_price, floor = _apply_profitable_sell_floor(
@@ -1066,6 +1135,8 @@ def _save_live_strategy_html_plot(strategy, signal, path):
         "profitTargetMode": getattr(strategy, "profit_target_mode", None),
         "orderQuantity": getattr(strategy, "order_quantity", None),
         "capitalBudget": _json_float(getattr(strategy, "capital_budget", None)),
+        "sizingMode": getattr(strategy, "sizing_mode", None),
+        "cashReserve": _json_float(getattr(strategy, "cash_reserve", None)),
         "regularHoursOnly": bool(getattr(strategy, "regular_hours_only", False)),
         "maxSpreadBps": _json_float(getattr(strategy, "max_spread_bps", None)),
         "maxQuoteAge": _json_float(getattr(strategy, "max_quote_age", None)),
@@ -1369,6 +1440,8 @@ renderGrid("paramsGrid", [
   ["profit target mode", params.profitTargetMode || "n/a"],
   ["order quantity", fmt(params.orderQuantity)],
   ["capital budget", money(params.capitalBudget)],
+  ["sizing mode", params.sizingMode || "n/a"],
+  ["cash reserve", money(params.cashReserve)],
   ["regular hours only", params.regularHoursOnly ? "yes" : "no"],
   ["max spread", `${{fmt(params.maxSpreadBps)}} bps`],
   ["max quote age", `${{fmt(params.maxQuoteAge)}} sec`],
@@ -1754,6 +1827,8 @@ def watch_stock_quote(
     min_sell_profit=0.01,
     min_sell_profit_per_share=0.0,
     profit_target_mode="per_share",
+    sizing_mode="fixed",
+    cash_reserve=0.0,
     stop_after_order=True,
 ):
     """Continuously print Level 1 quotes from TWS and optionally act on signals."""
@@ -1936,6 +2011,8 @@ def watch_stock_quote(
                         min_sell_profit=min_sell_profit,
                         min_sell_profit_per_share=min_sell_profit_per_share,
                         profit_target_mode=profit_target_mode,
+                        sizing_mode=sizing_mode,
+                        cash_reserve=cash_reserve,
                     )
                     if trade is not None:
                         pending_trades.append({
@@ -1981,6 +2058,8 @@ def watch_stock_quote(
                             min_sell_profit=min_sell_profit,
                             min_sell_profit_per_share=min_sell_profit_per_share,
                             profit_target_mode=profit_target_mode,
+                            sizing_mode=sizing_mode,
+                            cash_reserve=cash_reserve,
                             auto_orders=auto_orders,
                         )
                         if trade is not None:
@@ -2238,6 +2317,22 @@ def parse_args(argv):
         help="Dollar budget used for live discrete-share wealth accounting.",
     )
     parser.add_argument(
+        "--sizing-mode",
+        choices=("fixed", "cash_reserve"),
+        default="fixed",
+        help=(
+            "Order sizing rule. fixed uses --order-quantity. cash_reserve buys "
+            "as many whole shares as possible while leaving --cash-reserve dollars, "
+            "and sells the full current strategy position."
+        ),
+    )
+    parser.add_argument(
+        "--cash-reserve",
+        type=float,
+        default=100.0,
+        help="Cash to leave unused when --sizing-mode cash_reserve is active.",
+    )
+    parser.add_argument(
         "--limit-buffer-bps",
         type=float,
         default=5.0,
@@ -2440,6 +2535,8 @@ def main(argv=None):
                     "order_quantity": args.order_quantity,
                     "initial_buy_if_cash": args.initial_buy_if_cash,
                     "capital_budget": args.capital_budget,
+                    "sizing_mode": args.sizing_mode,
+                    "cash_reserve": args.cash_reserve,
                     "cash_reentry_cooldown_bars": args.cash_reentry_cooldown_bars,
                 },
                 signal_log_path=args.signal_log,
@@ -2456,6 +2553,8 @@ def main(argv=None):
                 min_sell_profit=args.min_sell_profit,
                 min_sell_profit_per_share=args.min_sell_profit_per_share,
                 profit_target_mode=args.profit_target_mode,
+                sizing_mode=args.sizing_mode,
+                cash_reserve=args.cash_reserve,
                 stop_after_order=not args.keep_running_after_order,
             )
         except KeyboardInterrupt:

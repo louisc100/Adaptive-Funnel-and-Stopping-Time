@@ -141,6 +141,8 @@ class LiveDryRunStrategy:
         order_quantity=1,
         initial_buy_if_cash=False,
         capital_budget=1000.0,
+        sizing_mode="fixed",
+        cash_reserve=0.0,
         cash_reentry_cooldown_bars=10,
     ):
         self.symbol = symbol.upper()
@@ -170,6 +172,10 @@ class LiveDryRunStrategy:
         self.order_quantity = max(int(order_quantity), 1)
         self.initial_buy_if_cash = bool(initial_buy_if_cash)
         self.capital_budget = max(float(capital_budget), 0.0)
+        self.sizing_mode = str(sizing_mode)
+        if self.sizing_mode not in ("fixed", "cash_reserve"):
+            self.sizing_mode = "fixed"
+        self.cash_reserve = max(float(cash_reserve), 0.0)
         self.cash_reentry_cooldown_bars = max(int(cash_reentry_cooldown_bars), 0)
         self.live_cash = self._initial_live_cash()
         self._initial_buy_emitted = False
@@ -418,7 +424,9 @@ class LiveDryRunStrategy:
         entry_price = self.initial_avg_cost
         if entry_price is None or entry_price <= 0:
             return None
-        quantity = max(int(self.order_quantity), 1)
+        quantity = self.active_sell_quantity()
+        if quantity <= 0:
+            return None
         prop_cost = max(float(self.cost), 0.0)
         if prop_cost >= 1.0:
             return None
@@ -505,12 +513,40 @@ class LiveDryRunStrategy:
         return False, ""
 
     def _effective_proportional_cost(self, reference_price):
-        notional = max(float(reference_price) * self.order_quantity, 1e-12)
-        target_profit = self._target_profit(self.order_quantity)
+        quantity = self.active_quantity_for_cost(reference_price)
+        notional = max(float(reference_price) * quantity, 1e-12)
+        target_profit = self._target_profit(quantity)
         return {
             "buy": self.cost + self.fixed_buy_fee / notional,
             "sell": self.cost + (self.fixed_sell_fee + target_profit) / notional,
         }
+
+    def active_buy_quantity(self, reference_price):
+        """Shares to buy under the selected live sizing rule."""
+        if self.sizing_mode != "cash_reserve":
+            return max(int(self.order_quantity), 1)
+        reference_price = self._clean_float(reference_price)
+        if reference_price is None or reference_price <= 0:
+            return 0
+        spendable_cash = self.live_cash - self.cash_reserve - self.fixed_buy_fee
+        if spendable_cash <= 0:
+            return 0
+        unit_cost = reference_price * (1.0 + max(float(self.cost), 0.0))
+        return max(int(np.floor(spendable_cash / unit_cost)), 0)
+
+    def active_sell_quantity(self):
+        """Shares to sell when the live account-aware strategy exits."""
+        if self.sizing_mode == "cash_reserve":
+            position = 0.0 if self.initial_position is None else self.initial_position
+            return max(int(np.floor(position)), 0)
+        return max(int(self.order_quantity), 1)
+
+    def active_quantity_for_cost(self, reference_price):
+        """Quantity used when translating fixed fees into effective cost h."""
+        if self.initial_position is not None and self.initial_position > 0:
+            return max(int(np.floor(self.initial_position)), 1)
+        quantity = self.active_buy_quantity(reference_price)
+        return max(quantity, int(self.order_quantity), 1)
 
     def _target_profit(self, quantity=None):
         quantity = max(int(self.order_quantity if quantity is None else quantity), 1)
@@ -879,6 +915,8 @@ class LiveDryRunStrategy:
                 "profit_target_mode": self.profit_target_mode,
                 "order_quantity": self.order_quantity,
                 "capital_budget": self.capital_budget,
+                "sizing_mode": self.sizing_mode,
+                "cash_reserve": self.cash_reserve,
                 "cash_reentry_cooldown_bars": self.cash_reentry_cooldown_bars,
             },
             "capital_budget": self._clean_float(self.capital_budget),
@@ -935,6 +973,10 @@ class LiveDryRunStrategy:
                 self.profit_target_mode = "per_share"
             self.order_quantity = int(params.get("order_quantity", self.order_quantity))
             self.capital_budget = float(params.get("capital_budget", self.capital_budget))
+            self.sizing_mode = str(params.get("sizing_mode", self.sizing_mode))
+            if self.sizing_mode not in ("fixed", "cash_reserve"):
+                self.sizing_mode = "fixed"
+            self.cash_reserve = float(params.get("cash_reserve", self.cash_reserve))
             self.cash_reentry_cooldown_bars = int(
                 params.get(
                     "cash_reentry_cooldown_bars",
