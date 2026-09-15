@@ -190,14 +190,16 @@ def _quantity_for_signal(
     """Choose order size for a strategy signal."""
     action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
     fallback_quantity = max(int(fallback_quantity), 1)
-    if sizing_mode != "cash_reserve" or strategy is None:
+    if strategy is None:
         return fallback_quantity
     if action == "SELL":
         quantity_fn = getattr(strategy, "active_sell_quantity", None)
         if callable(quantity_fn):
-            return int(quantity_fn())
+            return float(quantity_fn())
         position = _safe_float(getattr(strategy, "initial_position", None))
-        return max(int(math.floor(position or 0.0)), 0)
+        return max(position, 0.0) if position is not None else fallback_quantity
+    if sizing_mode != "cash_reserve":
+        return fallback_quantity
     reference_price = _safe_float(limit_price or signal.close_ask)
     quantity_fn = getattr(strategy, "active_buy_quantity", None)
     if callable(quantity_fn):
@@ -225,8 +227,8 @@ def _minimum_profitable_sell_limit(
     entry_price = _safe_float(getattr(strategy, "initial_avg_cost", None))
     if entry_price is None or entry_price <= 0:
         return None
-    quantity = int(quantity)
-    if quantity <= 0:
+    quantity = float(quantity)
+    if not math.isfinite(quantity) or quantity <= 0:
         return None
     prop_cost = max(float(getattr(strategy, "cost", 0.0)), 0.0)
     if prop_cost >= 1.0:
@@ -296,8 +298,8 @@ def _submit_limit_order(
     if limit_price is None:
         return None
     action = "BUY" if signal.signal == "WOULD BUY" else "SELL"
-    quantity = int(quantity)
-    if quantity <= 0:
+    quantity = float(quantity)
+    if not math.isfinite(quantity) or quantity <= 0:
         print("Order skipped: quantity must be positive.")
         return None
     floor = None
@@ -353,11 +355,11 @@ def _submit_action_limit_order(
 ):
     """Submit a direct BUY/SELL limit order from an interactive override."""
     action = action.upper()
-    quantity = int(quantity)
+    quantity = float(quantity)
     if action not in ("BUY", "SELL"):
         print("Order skipped: action must be BUY or SELL.")
         return None
-    if quantity <= 0:
+    if not math.isfinite(quantity) or quantity <= 0:
         print("Order skipped: quantity must be positive.")
         return None
     if limit_price is None:

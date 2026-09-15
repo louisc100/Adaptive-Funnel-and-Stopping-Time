@@ -536,20 +536,21 @@ class LiveDryRunStrategy:
 
     def active_sell_quantity(self):
         """Shares to sell when the live account-aware strategy exits."""
+        if self.initial_position is not None:
+            return max(float(self.initial_position), 0.0)
         if self.sizing_mode == "cash_reserve":
-            position = 0.0 if self.initial_position is None else self.initial_position
-            return max(int(np.floor(position)), 0)
+            return 0.0
         return max(int(self.order_quantity), 1)
 
     def active_quantity_for_cost(self, reference_price):
         """Quantity used when translating fixed fees into effective cost h."""
         if self.initial_position is not None and self.initial_position > 0:
-            return max(int(np.floor(self.initial_position)), 1)
+            return float(self.initial_position)
         quantity = self.active_buy_quantity(reference_price)
         return max(quantity, int(self.order_quantity), 1)
 
     def _target_profit(self, quantity=None):
-        quantity = max(int(self.order_quantity if quantity is None else quantity), 1)
+        quantity = max(float(self.order_quantity if quantity is None else quantity), 0.0)
         fixed_profit = self.min_sell_profit
         per_share_profit = self.min_sell_profit_per_share * quantity
         if self.profit_target_mode == "fixed":
