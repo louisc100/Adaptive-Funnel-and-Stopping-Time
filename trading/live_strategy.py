@@ -1,8 +1,8 @@
 """
-Live dry-run adapter for the trading algorithm.
+Live strategy state, fill accounting, and signal generation.
 
 This module keeps broker connectivity out of the strategy logic. It receives
-completed mid-price bars, reuses the existing research strategy from main.py,
+completed mid-price bars, reuses the research strategy from trading/gui.py,
 and emits terminal-friendly HOLD / WOULD BUY / WOULD SELL messages.
 
 No orders are placed here.
@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import numpy as np
 
-from main import (
+from trading.gui import (
     estimate_sigma_seed,
     garch_volatility_estimates,
     kalman_drift_estimates,

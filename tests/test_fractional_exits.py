@@ -2,13 +2,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from ibkr_bridge import (
+from trading.ibkr_bot import (
     _minimum_profitable_sell_limit,
     _quantity_for_signal,
     _submit_action_limit_order,
     _submit_limit_order,
 )
-from live_strategy import LiveDryRunStrategy
+from trading.live_strategy import LiveDryRunStrategy
 
 
 class FractionalExitTests(unittest.TestCase):

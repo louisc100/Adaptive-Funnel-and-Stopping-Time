@@ -32,4 +32,5 @@ data/
 *.key
 
 # Generated smoke-test reports
-Reports/*smoke*
+reports/*smoke*
+/archive/

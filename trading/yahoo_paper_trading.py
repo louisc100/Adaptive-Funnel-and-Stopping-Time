@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-import main
+from trading import gui as main
 
 
 DEFAULT_STATE_PATH = Path("data/paper_trading_state.json")
